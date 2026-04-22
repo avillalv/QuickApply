@@ -86,7 +86,7 @@ export default function Settings() {
     default_mode: 'copilot',
     browser_visible: 'true',
     auto_submit: 'false',
-    typing_speed_ms: '60',
+    typing_speed_ms: '35',
     page_load_timeout: '30',
     anthropic_model: 'claude-sonnet-4-6',
     desktop_notifications: 'true',

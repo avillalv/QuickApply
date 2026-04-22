@@ -97,6 +97,7 @@ class AutomationSession:
         self.settings = settings
         self.status = "starting"
         self.current_page = 0
+        self.application_id: Optional[str] = None  # set by router after DB insert
         self.task: Optional[asyncio.Task] = None
         self._queue: asyncio.Queue = asyncio.Queue()
         self.created_at = datetime.now().isoformat()
@@ -125,12 +126,6 @@ class AutomationSession:
         elif action in ("auto_proceed", "captcha_solved", "login_done"):
             await self._queue.put({"action": "proceed", "overrides": []})
 
-    def get_resume_text(self, label: str) -> str:
-        for r in self.resumes:
-            if r.get("label") == label:
-                return r.get("parsed_text") or ""
-        return ""
-
     def get_resume_path(self, label: str) -> Optional[str]:
         filename = label.replace(" ", "_") + ".pdf"
         path = os.path.join(os.path.dirname(__file__), "..", "..", "resumes", filename)
@@ -139,16 +134,36 @@ class AutomationSession:
 
 
 # ---------------------------------------------------------------------------
+# DB helper — update application record after submit
+# ---------------------------------------------------------------------------
+
+async def _update_application_status(app_id: str, status: str, answers: dict) -> None:
+    """Update the tracker record with final status and any captured answers."""
+    try:
+        from database import get_supabase
+        from datetime import timezone
+        sb = get_supabase()
+        data: dict = {
+            "status": status,
+            "last_status_update": datetime.now(timezone.utc).isoformat(),
+        }
+        if answers:
+            data["answers_given"] = answers
+        sb.table("applications").update(data).eq("id", app_id).execute()
+    except Exception:
+        pass  # non-fatal — record already exists with correct data
+
+
+# ---------------------------------------------------------------------------
 # Edge-case detection helpers
 # ---------------------------------------------------------------------------
 
 async def _detect_captcha(page) -> str | None:
-    """Returns captcha type string or None if no captcha found."""
     indicators = await page.evaluate("""() => {
         if (document.querySelector('iframe[src*="recaptcha"]')) return 'reCAPTCHA';
         if (document.querySelector('iframe[src*="hcaptcha"]')) return 'hCaptcha';
         if (document.querySelector('.cf-challenge-running, #cf-challenge-body, .cf-browser-verification')) return 'Cloudflare';
-        if (document.querySelector('[data-callback*="captcha"], .g-recaptcha, #hcaptcha')) return 'CAPTCHA';
+        if (document.querySelector('.g-recaptcha, #hcaptcha')) return 'CAPTCHA';
         if (document.querySelector('img[alt*="captcha" i], input[name*="captcha" i]')) return 'Image CAPTCHA';
         return null;
     }""")
@@ -156,7 +171,6 @@ async def _detect_captcha(page) -> str | None:
 
 
 async def _detect_login_wall(page) -> bool:
-    """Detect if we've hit a login wall blocking the application form."""
     result = await page.evaluate("""() => {
         const hasPassword = document.querySelector('input[type="password"]');
         if (!hasPassword) return false;
@@ -171,7 +185,6 @@ async def _detect_login_wall(page) -> bool:
 
 
 async def _detect_already_applied(page) -> bool:
-    """Check if we've already submitted an application for this job."""
     text = (await page.evaluate("() => document.body.innerText")).lower()
     patterns = [
         "already applied", "you've already applied", "you have already applied",
@@ -182,7 +195,6 @@ async def _detect_already_applied(page) -> bool:
 
 
 async def _detect_confirmation(page) -> bool:
-    """Check if we're on a submission confirmation page."""
     text = (await page.evaluate("() => document.body.innerText")).lower()
     patterns = [
         "thank you for applying", "application received",
@@ -195,13 +207,12 @@ async def _detect_confirmation(page) -> bool:
 
 
 async def _get_validation_errors(page) -> list[str]:
-    """Collect visible form validation error messages."""
     errors = await page.evaluate("""() => {
         const selectors = [
             '.error-message', '.field-error', '.validation-error',
             '[class*="error"]:not([class*="error-icon"])',
             '[class*="invalid"]', '.alert-danger', '.form-error',
-            '[aria-invalid="true"]', '[data-error]',
+            '[aria-invalid="true"]',
             '.input-feedback.error', '.helper-text--error',
         ];
         const seen = new Set();
@@ -221,32 +232,26 @@ async def _get_validation_errors(page) -> list[str]:
 
 
 async def _take_screenshot(page, session_id: str, label: str) -> Optional[str]:
-    """Save a debug screenshot and return the path."""
     try:
         screenshots_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..", "screenshots")
         )
         os.makedirs(screenshots_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{session_id[:8]}_{label}_{ts}.png"
-        path = os.path.join(screenshots_dir, filename)
+        path = os.path.join(screenshots_dir, f"{session_id[:8]}_{label}_{ts}.png")
         await page.screenshot(path=path, full_page=False)
         return path
     except Exception:
         return None
 
 
-async def _wait_for_page_stable(page, timeout: int = 20000):
-    """Wait for page to stabilise after navigation / button click."""
+async def _wait_for_page_stable(page, timeout: int = 15000):
+    """Fast page-stable check: domcontentloaded only; skip networkidle (too slow)."""
     try:
         await page.wait_for_load_state("domcontentloaded", timeout=timeout)
     except Exception:
         pass
-    try:
-        await page.wait_for_load_state("networkidle", timeout=10000)
-    except Exception:
-        pass
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.25)
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +267,7 @@ class ApplicationAutomator:
     async def run(self, job_url: str, resume_label: str,
                   job_data: dict, application_id: str) -> dict:
         session = self.session
+        answers_collected: dict = {}
 
         try:
             session.status = "running"
@@ -278,7 +284,7 @@ class ApplicationAutomator:
             )
 
             headless = session.settings.get("browser_visible", "true") != "true"
-            typing_delay = int(session.settings.get("typing_speed_ms", "60"))
+            typing_delay = int(session.settings.get("typing_speed_ms", "35"))
             handler.typing_delay = typing_delay
 
             from playwright.async_api import async_playwright
@@ -289,7 +295,8 @@ class ApplicationAutomator:
                         "--no-sandbox",
                         "--disable-blink-features=AutomationControlled",
                         "--disable-web-security",
-                        "--disable-features=IsolateOrigins,site-per-process",
+                        "--no-first-run",
+                        "--no-default-browser-check",
                     ],
                 )
                 context = await browser.new_context(
@@ -307,34 +314,32 @@ class ApplicationAutomator:
                 page = await context.new_page()
                 handler.page = page
 
-                # Handle new tab/popup: re-attach to most recent page
                 context.on("page", lambda new_page: asyncio.create_task(
                     self._on_new_page(new_page, handler, session)
                 ))
 
                 await session.log(f"Opening {job_url}")
                 try:
-                    await page.goto(job_url, timeout=30000, wait_until="domcontentloaded")
-                    await _wait_for_page_stable(page)
+                    await page.goto(job_url, timeout=25000, wait_until="domcontentloaded")
+                    await asyncio.sleep(0.5)
                 except Exception as e:
                     await session.log(f"Navigation warning: {e}", "warn")
 
-                # --- Check for immediate blockers ---
+                # Check for already-applied
                 if await _detect_already_applied(page):
                     await session.broadcast({
                         "type": "already_applied",
-                        "text": "It looks like you've already applied for this job.",
+                        "application_id": session.application_id,
+                        "text": "Already applied for this job.",
                     })
-                    await session.log("Already applied — detected on landing page.", "warn")
                     await browser.close()
                     session.status = "complete"
                     return {"success": False, "status": "already_applied"}
 
-                # --- Navigate to apply form ---
-                await session.log("Looking for Apply button…")
+                # Navigate to apply form
+                await session.log("Navigating to apply form…")
                 try:
                     await handler.navigate_to_apply(page)
-                    # Re-attach if navigation opened a new tab
                     pages = context.pages
                     if len(pages) > 1:
                         page = pages[-1]
@@ -343,13 +348,12 @@ class ApplicationAutomator:
                 except Exception as e:
                     await session.log(f"Navigate to apply: {e}", "warn")
 
-                # --- Check for login wall ---
+                # Check for login wall
                 if await _detect_login_wall(page):
                     await session.broadcast({
                         "type": "login_required",
-                        "text": "This job requires you to log in. Please sign in in the browser window, then click Continue.",
+                        "text": "Login required. Sign in, then click Continue.",
                     })
-                    await session.log("Login wall detected — waiting for user to sign in.", "warn")
                     result = await session.wait_for_user()
                     if result.get("action") == "abort":
                         await browser.close()
@@ -357,32 +361,29 @@ class ApplicationAutomator:
                         return {"success": False, "status": "aborted"}
                     await _wait_for_page_stable(page)
 
-                # --- Upload resume ---
+                # Upload resume
                 if resume_path:
                     try:
                         await handler.upload_resume(page, resume_path)
-                        await session.log(f"Resume uploaded: {resume_label}")
+                        await session.log(f"Resume: {resume_label}")
                     except Exception as e:
                         await session.log(f"Resume upload skipped: {e}", "warn")
 
-                # --- Multi-page form loop ---
+                # Multi-page loop
                 page_num = 1
-                max_pages = 20  # Safety cap
+                max_pages = 20
 
                 while page_num <= max_pages:
                     session.current_page = page_num
 
-                    # Check for CAPTCHA before processing each page
                     captcha_type = await _detect_captcha(page)
                     if captcha_type:
-                        screenshot_path = await _take_screenshot(page, session.session_id, "captcha")
+                        await _take_screenshot(page, session.session_id, "captcha")
                         await session.broadcast({
                             "type": "captcha_detected",
                             "captcha_type": captcha_type,
-                            "text": f"{captcha_type} detected. Please solve it in the browser window, then click Continue.",
-                            "screenshot": screenshot_path,
+                            "text": f"{captcha_type} — solve in browser, then Continue.",
                         })
-                        await session.log(f"CAPTCHA detected: {captcha_type}. Waiting for user.", "warn")
                         result = await session.wait_for_user()
                         if result.get("action") == "abort":
                             await browser.close()
@@ -390,24 +391,25 @@ class ApplicationAutomator:
                             return {"success": False, "status": "aborted"}
                         await _wait_for_page_stable(page)
 
-                    # Check if navigated to confirmation (application submitted early)
                     if await _detect_confirmation(page):
+                        if session.application_id:
+                            await _update_application_status(
+                                session.application_id, "Applied", answers_collected
+                            )
                         await session.broadcast({
-                            "type": "complete",
-                            "success": True,
-                            "text": "Application submitted successfully! Confirmation detected.",
+                            "type": "complete", "success": True,
+                            "application_id": session.application_id,
+                            "text": "Application submitted! Saved to Tracker.",
                         })
                         await browser.close()
                         session.status = "complete"
                         return {"success": True, "status": "complete"}
 
                     await session.broadcast({
-                        "type": "step_start",
-                        "page": page_num,
+                        "type": "step_start", "page": page_num,
                         "label": f"Page {page_num}",
                     })
 
-                    # Scan & fill fields
                     try:
                         fields = await handler.get_form_fields(page)
                     except Exception as e:
@@ -417,12 +419,14 @@ class ApplicationAutomator:
                     filled = [f.to_dict() for f in fields if f.filled and not f.needs_review]
                     needs_review = [f.to_dict() for f in fields if f.needs_review]
 
-                    # Page ready — send to frontend
+                    # Accumulate answers for tracker record
+                    for f in fields:
+                        if f.filled and f.value:
+                            answers_collected[f.label or f.name] = f.value
+
                     await session.broadcast({
-                        "type": "page_ready",
-                        "page": page_num,
-                        "filled": filled,
-                        "needs_review": needs_review,
+                        "type": "page_ready", "page": page_num,
+                        "filled": filled, "needs_review": needs_review,
                         "url": page.url,
                     })
 
@@ -434,7 +438,6 @@ class ApplicationAutomator:
                             session.status = "aborted"
                             return {"success": False, "status": "aborted"}
 
-                        # Apply user overrides
                         for override in result.get("overrides", []):
                             matching = next(
                                 (f for f in fields if f.name == override.get("name")), None
@@ -442,10 +445,10 @@ class ApplicationAutomator:
                             if matching and override.get("value") is not None:
                                 try:
                                     await handler.fill_field(page, matching, override["value"])
+                                    answers_collected[matching.label or matching.name] = override["value"]
                                 except Exception as e:
                                     await session.log(f"Override fill failed ({matching.name}): {e}", "warn")
 
-                    # Try to advance to next page
                     try:
                         has_next = await handler.next_page(page)
                     except Exception as e:
@@ -455,39 +458,36 @@ class ApplicationAutomator:
                     if not has_next:
                         break
 
-                    # Check for validation errors after attempted advance
-                    await asyncio.sleep(0.6)
+                    await asyncio.sleep(0.3)
                     errors = await _get_validation_errors(page)
                     if errors:
-                        await session.log(
-                            f"Form errors: {'; '.join(errors[:3])}", "warn"
-                        )
+                        await session.log(f"Form errors: {'; '.join(errors[:3])}", "warn")
                         await session.broadcast({
-                            "type": "validation_errors",
-                            "errors": errors,
-                            "page": page_num,
+                            "type": "validation_errors", "errors": errors, "page": page_num,
                         })
-                        # Re-scan page (stay on same page for user to fix)
                         continue
 
                     page_num += 1
                     await _wait_for_page_stable(page)
 
-                # --- Submit phase ---
+                # Submit phase
                 if await _detect_confirmation(page):
+                    if session.application_id:
+                        await _update_application_status(
+                            session.application_id, "Applied", answers_collected
+                        )
                     await session.broadcast({
-                        "type": "complete",
-                        "success": True,
-                        "text": "Application submitted successfully!",
+                        "type": "complete", "success": True,
+                        "application_id": session.application_id,
+                        "text": "Application submitted! Saved to Tracker.",
                     })
                     await browser.close()
                     session.status = "complete"
                     return {"success": True, "status": "complete"}
 
                 await session.broadcast({
-                    "type": "ready_to_submit",
-                    "page": page_num,
-                    "message": "All pages complete. Review the application in the browser, then submit.",
+                    "type": "ready_to_submit", "page": page_num,
+                    "message": "All pages filled. Review then submit.",
                 })
 
                 auto_submit = session.settings.get("auto_submit", "false") == "true"
@@ -502,22 +502,23 @@ class ApplicationAutomator:
 
                 if auto_submit or session.mode == "full_auto":
                     submitted = await handler.submit(page)
-                    await asyncio.sleep(2)
-                    # Verify confirmation
-                    confirmed = await _detect_confirmation(page)
-                    if confirmed:
+                    await asyncio.sleep(1.5)
+                    if await _detect_confirmation(page):
                         submitted = True
                 else:
-                    submitted = True
+                    submitted = True  # user clicked submit manually in browser
+
+                if submitted and session.application_id:
+                    await _update_application_status(
+                        session.application_id, "Applied", answers_collected
+                    )
 
                 await session.broadcast({
                     "type": "complete",
                     "success": submitted,
-                    "text": (
-                        "Application submitted successfully! Check the browser to confirm."
-                        if submitted
-                        else "Submission reached — please verify in the browser."
-                    ),
+                    "application_id": session.application_id,
+                    "text": "Application submitted! Saved to Tracker." if submitted
+                            else "Submission step reached — verify in browser.",
                 })
 
                 await context.close()
@@ -530,8 +531,6 @@ class ApplicationAutomator:
             session.status = "aborted"
             return {"success": False, "status": "cancelled"}
         except Exception as exc:
-            import traceback
-            tb = traceback.format_exc()
             await session.log(f"Fatal error: {exc}", "error")
             await session.broadcast({"type": "error", "text": str(exc)})
             session.status = "error"
@@ -540,11 +539,10 @@ class ApplicationAutomator:
             cleanup_session(session.session_id)
 
     async def _on_new_page(self, new_page, handler, session: AutomationSession):
-        """Handle popup/new tab by re-attaching the handler."""
         try:
-            await new_page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await new_page.wait_for_load_state("domcontentloaded", timeout=8000)
             handler.page = new_page
-            await session.log("Switched to new tab/popup.", "info")
+            await session.log("Switched to new tab.", "info")
         except Exception:
             pass
 
@@ -560,18 +558,11 @@ class ApplicationAutomator:
 
         p, m = self.session.profile, self.session.mode
         ats_lower = ats.lower()
-        if "workday" in ats_lower:
-            return WorkdayHandler(p, m)
-        if "greenhouse" in ats_lower:
-            return GreenhouseHandler(p, m)
-        if "lever" in ats_lower:
-            return LeverHandler(p, m)
-        if "icims" in ats_lower:
-            return ICIMSHandler(p, m)
-        if "smartrecruiter" in ats_lower:
-            return SmartRecruitersHandler(p, m)
-        if "ashby" in ats_lower:
-            return AshbyHandler(p, m)
-        if "bamboohr" in ats_lower or "bamboo" in ats_lower:
-            return BambooHRHandler(p, m)
+        if "workday" in ats_lower:   return WorkdayHandler(p, m)
+        if "greenhouse" in ats_lower: return GreenhouseHandler(p, m)
+        if "lever" in ats_lower:     return LeverHandler(p, m)
+        if "icims" in ats_lower:     return ICIMSHandler(p, m)
+        if "smartrecruiter" in ats_lower: return SmartRecruitersHandler(p, m)
+        if "ashby" in ats_lower:     return AshbyHandler(p, m)
+        if "bamboo" in ats_lower:    return BambooHRHandler(p, m)
         return GenericHandler(p, m)

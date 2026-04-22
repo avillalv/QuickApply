@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
-  CheckCircle, AlertTriangle, X, ChevronRight, Pause, Play,
-  Zap, Loader2, Terminal, Send, XCircle, ShieldAlert, LogIn,
-  RefreshCw, SkipForward, Clock,
+  CheckCircle, AlertTriangle, X, ChevronRight,
+  Zap, Loader2, Send, XCircle, ShieldAlert, LogIn, BarChart2, Clock,
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -246,6 +246,7 @@ function ElapsedTimer({ startTime }) {
 // ---------------------------------------------------------------------------
 
 export default function AutomationOverlay({ sessionId, mode, analysis, jobData, onClose }) {
+  const navigate = useNavigate()
   const [wsStatus, setWsStatus] = useState('connecting')
   const [phase, setPhase] = useState('starting')
   const [step, setStep] = useState({ page: 1, label: 'Starting…' })
@@ -254,6 +255,7 @@ export default function AutomationOverlay({ sessionId, mode, analysis, jobData, 
   const [overrides, setOverrides] = useState({})
   const [log, setLog] = useState([])
   const [doneMessage, setDoneMessage] = useState('')
+  const [applicationId, setApplicationId] = useState(null)
   const [captchaInfo, setCaptchaInfo] = useState(null)
   const [loginRequired, setLoginRequired] = useState(false)
   const [validationErrors, setValidationErrors] = useState([])
@@ -320,6 +322,7 @@ export default function AutomationOverlay({ sessionId, mode, analysis, jobData, 
       case 'complete':
         setPhase('done')
         setDoneMessage(msg.text || 'Application submitted!')
+        if (msg.application_id) setApplicationId(msg.application_id)
         addLog(msg.text || 'Done!', 'success')
         break
       case 'error':
@@ -511,6 +514,14 @@ export default function AutomationOverlay({ sessionId, mode, analysis, jobData, 
             <CheckCircle size={28} className="text-green-400 mx-auto mb-2" />
             <p className="text-green-300 font-semibold text-sm">{doneMessage}</p>
             <p className="text-gray-600 text-xs mt-1">Application saved to Tracker.</p>
+            {applicationId && (
+              <button
+                onClick={() => { onClose(); navigate('/tracker') }}
+                className="mt-3 flex items-center justify-center gap-2 w-full px-3 py-2 bg-green-600/20 hover:bg-green-600/30 border border-green-500/30 text-green-300 text-xs font-semibold rounded-lg transition-all"
+              >
+                <BarChart2 size={12} /> View in Tracker
+              </button>
+            )}
           </div>
         )}
         {phase === 'error' && (

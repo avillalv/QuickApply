@@ -78,7 +78,7 @@ class WorkdayHandler(ATSHandler):
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
                     await el.click()
-                    await page.wait_for_load_state("networkidle", timeout=20000)
+                    await page.wait_for_load_state("networkidle", timeout=8000)
                     return
             except Exception:
                 continue
@@ -338,7 +338,7 @@ class WorkdayHandler(ATSHandler):
                 btn = await page.query_selector(sel)
                 if btn and await btn.is_visible():
                     await btn.click()
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.4)
                     break
             except Exception:
                 pass
@@ -355,8 +355,8 @@ class WorkdayHandler(ATSHandler):
                 if el:
                     await el.set_input_files(file_path)
                     # Wait for upload processing
-                    await page.wait_for_load_state("networkidle", timeout=15000)
-                    await asyncio.sleep(1)
+                    await page.wait_for_load_state("networkidle", timeout=8000)
+                    await asyncio.sleep(0.4)
                     return
             except Exception:
                 continue
@@ -375,8 +375,8 @@ class WorkdayHandler(ATSHandler):
                 btn = await page.query_selector(sel)
                 if btn and await btn.is_visible():
                     await btn.click()
-                    await page.wait_for_load_state("networkidle", timeout=20000)
-                    await asyncio.sleep(0.8)
+                    await page.wait_for_load_state("networkidle", timeout=8000)
+                    await asyncio.sleep(0.3)
                     return True
             except Exception:
                 continue
@@ -394,7 +394,7 @@ class WorkdayHandler(ATSHandler):
                 btn = await page.query_selector(sel)
                 if btn and await btn.is_visible():
                     await btn.click()
-                    await page.wait_for_load_state("networkidle", timeout=25000)
+                    await page.wait_for_load_state("networkidle", timeout=8000)
                     return True
             except Exception:
                 continue

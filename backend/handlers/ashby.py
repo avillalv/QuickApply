@@ -46,8 +46,8 @@ class AshbyHandler(ATSHandler):
                         await page.goto(href, timeout=20000, wait_until="domcontentloaded")
                     else:
                         await el.click()
-                        await page.wait_for_load_state("domcontentloaded", timeout=20000)
-                    await asyncio.sleep(1)
+                        await page.wait_for_load_state("domcontentloaded", timeout=12000)
+                    await asyncio.sleep(0.4)
                     return
             except Exception:
                 continue
@@ -257,7 +257,7 @@ class AshbyHandler(ATSHandler):
                 el = await page.query_selector(sel)
                 if el:
                     await el.set_input_files(file_path)
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(0.6)
                     return
             except Exception:
                 continue
@@ -275,8 +275,8 @@ class AshbyHandler(ATSHandler):
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
                     await el.click()
-                    await page.wait_for_load_state("networkidle", timeout=15000)
-                    await asyncio.sleep(0.8)
+                    await page.wait_for_load_state("networkidle", timeout=8000)
+                    await asyncio.sleep(0.3)
                     return True
             except Exception:
                 continue
@@ -294,7 +294,7 @@ class AshbyHandler(ATSHandler):
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
                     await el.click()
-                    await page.wait_for_load_state("networkidle", timeout=25000)
+                    await page.wait_for_load_state("networkidle", timeout=8000)
                     return True
             except Exception:
                 continue

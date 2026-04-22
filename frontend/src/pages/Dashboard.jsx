@@ -130,6 +130,7 @@ export default function Dashboard() {
         resumeLabel: analysis.recommended_resume || 'Data Engineer',
         mode,
         jobData,
+        matchScore: analysis.match_score ?? null,
       })
       setSession({ sessionId: result.session_id, mode, applicationId: result.application_id })
     } catch (err) {

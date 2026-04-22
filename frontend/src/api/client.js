@@ -30,7 +30,7 @@ export async function analyzeJob(url) {
 
 // ─── Automation ───────────────────────────────────────────────────────────────
 
-export async function startAutomation({ jobUrl, resumeLabel, mode, jobData, applicationId }) {
+export async function startAutomation({ jobUrl, resumeLabel, mode, jobData, matchScore, applicationId }) {
   const res = await fetch(`${BASE_URL}/automation/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -39,6 +39,7 @@ export async function startAutomation({ jobUrl, resumeLabel, mode, jobData, appl
       resume_label: resumeLabel,
       mode,
       job_data: jobData || {},
+      match_score: matchScore ?? null,
       application_id: applicationId || null,
     }),
   })

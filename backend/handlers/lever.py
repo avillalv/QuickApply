@@ -42,7 +42,7 @@ class LeverHandler(ATSHandler):
                         await page.goto(href, timeout=15000, wait_until="domcontentloaded")
                     else:
                         await el.click()
-                        await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                        await page.wait_for_load_state("domcontentloaded", timeout=10000)
                     return
             except Exception:
                 continue
@@ -200,7 +200,7 @@ class LeverHandler(ATSHandler):
                 el = await page.query_selector(sel)
                 if el:
                     await el.set_input_files(file_path)
-                    await asyncio.sleep(0.8)
+                    await asyncio.sleep(0.3)
                     return
             except Exception:
                 continue
@@ -221,7 +221,7 @@ class LeverHandler(ATSHandler):
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
                     await el.click()
-                    await page.wait_for_load_state("domcontentloaded", timeout=20000)
+                    await page.wait_for_load_state("domcontentloaded", timeout=12000)
                     return True
             except Exception:
                 continue

@@ -29,6 +29,7 @@ class StartAutomationRequest(BaseModel):
     resume_label: str
     mode: str = "copilot"
     job_data: dict = {}
+    match_score: Optional[int] = None
     application_id: Optional[str] = None
 
 
@@ -64,7 +65,7 @@ async def start_automation(req: StartAutomationRequest):
 
     automator = ApplicationAutomator(session)
 
-    # Create a record if not already done
+    # Create tracker record immediately so it shows up in Tracker right away
     app_id = req.application_id
     if not app_id:
         try:
@@ -77,6 +78,7 @@ async def start_automation(req: StartAutomationRequest):
                 "location": req.job_data.get("location", ""),
                 "salary_range": req.job_data.get("salary_range", ""),
                 "resume_used": req.resume_label,
+                "match_score": req.match_score,
                 "status": "Applied",
                 "job_description": req.job_data.get("job_description", "")[:5000],
                 "applied_at": datetime.now(timezone.utc).isoformat(),
@@ -87,6 +89,10 @@ async def start_automation(req: StartAutomationRequest):
                 app_id = result.data[0]["id"]
         except Exception:
             pass
+
+    # Store app_id in session so the automator can update on completion
+    if app_id:
+        session.application_id = app_id
 
     # Launch the automation task (non-blocking)
     task = asyncio.create_task(
