@@ -64,7 +64,7 @@ class GreenhouseHandler(ATSHandler):
             return
 
     async def get_form_fields(self, page) -> list[FormField]:
-        mapper = FieldMapper(self.profile)
+        mapper = FieldMapper(self.profile, self._role_config)
         fields: list[FormField] = []
         filled_names: set[str] = set()
 

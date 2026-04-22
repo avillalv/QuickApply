@@ -1,12 +1,18 @@
 from typing import Optional
 from pydantic import BaseModel, Field
-from enum import Enum
 
 
-class ResumeLabel(str, Enum):
-    data_engineer = "Data Engineer"
-    data_analyst = "Data Analyst"
-    data_science = "Data Science"
+class WorkExperienceEntry(BaseModel):
+    company: str = ""
+    title: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    description: str = ""
+
+
+class RoleConfig(BaseModel):
+    work_experience: list[WorkExperienceEntry] = Field(default_factory=list)
+    cover_letter_template: Optional[str] = None
 
 
 class ProfileData(BaseModel):
@@ -35,6 +41,10 @@ class ProfileData(BaseModel):
     experience: dict[str, str] = Field(
         default_factory=dict,
         description="Mapping of technology/skill to years of experience",
+    )
+    roles: dict[str, RoleConfig] = Field(
+        default_factory=dict,
+        description="Role-specific configs keyed by role/resume label",
     )
     cover_letter_template: Optional[str] = None
     salary_expectation: Optional[str] = None

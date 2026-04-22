@@ -35,11 +35,13 @@ class FormField:
 class ATSHandler:
     """Base class for all ATS application handlers."""
 
-    def __init__(self, profile: dict, mode: str = "copilot") -> None:
+    def __init__(self, profile: dict, mode: str = "copilot", role_label: str = "") -> None:
         self.profile = profile
         self.mode = mode
+        self.role_label = role_label
+        self._role_config: dict = profile.get("roles", {}).get(role_label, {})
         self.page = None
-        self.typing_delay: int = 60
+        self.typing_delay: int = 35
 
     # ------------------------------------------------------------------
     # Subclass interface
@@ -422,7 +424,7 @@ class ATSHandler:
 
     def _profile_value(self, key: str) -> Optional[str]:
         from utils.field_mapper import FieldMapper
-        return FieldMapper(self.profile)._get_profile_value(key)
+        return FieldMapper(self.profile, self._role_config)._get_profile_value(key)
 
     async def _get_label_for_element(self, page, element) -> str:
         """Find the label text associated with a form element."""

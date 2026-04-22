@@ -104,6 +104,28 @@ FIELD_MAPPINGS: dict[str, list[str]] = {
     "cover_letter_template": [
         "cover letter", "covering letter", "letter of interest",
     ],
+    # Work experience — filled from role-specific config
+    "current_employer": [
+        "current employer", "employer", "company", "company name", "employer name",
+        "organization", "current company", "place of employment", "employer/company",
+    ],
+    "current_title": [
+        "current title", "job title", "position", "title", "current position",
+        "current role", "role", "position title", "your title",
+    ],
+    "employment_start": [
+        "start date", "employment start", "start of employment", "from",
+        "date started", "employment from",
+    ],
+    "employment_end": [
+        "end date", "employment end", "end of employment", "to",
+        "date ended", "employment to",
+    ],
+    "job_description": [
+        "job description", "responsibilities", "duties", "role description",
+        "describe your experience", "describe your work", "describe your role",
+        "work description", "summary of experience", "experience description",
+    ],
 }
 
 # Reverse index: pattern → profile_key (built once at module load)
@@ -139,8 +161,9 @@ def _fuzzy_match(query: str, candidates: list[str]) -> tuple[Optional[str], floa
 class FieldMapper:
     """Maps HTML form fields to profile data values."""
 
-    def __init__(self, profile: dict) -> None:
+    def __init__(self, profile: dict, role_config: dict = None) -> None:
         self.profile = profile
+        self.role_config = role_config or {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -203,6 +226,14 @@ class FieldMapper:
         """
         profile = self.profile
 
+        # cover_letter_template: role-specific takes priority over base profile
+        if key == "cover_letter_template":
+            rc_template = self.role_config.get("cover_letter_template")
+            if rc_template:
+                return str(rc_template)
+            val = profile.get("cover_letter_template")
+            return str(val) if val else None
+
         # Direct key lookup first
         if key in profile and profile[key] is not None:
             raw = profile[key]
@@ -255,5 +286,23 @@ class FieldMapper:
             if val is None:
                 return None
             return "Yes" if val else "No"
+
+        # Role-specific work experience (uses most recent entry at index 0)
+        if key in ("current_employer", "current_title", "employment_start", "employment_end", "job_description"):
+            wx = self.role_config.get("work_experience", [])
+            if wx:
+                entry = wx[0] if isinstance(wx[0], dict) else {}
+                field_map = {
+                    "current_employer": "company",
+                    "current_title": "title",
+                    "employment_start": "start_date",
+                    "employment_end": "end_date",
+                    "job_description": "description",
+                }
+                val = entry.get(field_map[key], "")
+                if key == "employment_end" and not val:
+                    return "Present"
+                return val or None
+            return None
 
         return None

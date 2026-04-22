@@ -46,10 +46,6 @@ async def upload_resume(
     file: UploadFile = File(...),
     label: str = Form(...),
 ):
-    valid_labels = {"Data Engineer", "Data Analyst", "Data Science"}
-    if label not in valid_labels:
-        raise HTTPException(status_code=400, detail=f"label must be one of: {', '.join(valid_labels)}")
-
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
 

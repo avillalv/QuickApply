@@ -274,7 +274,7 @@ class ApplicationAutomator:
 
             from services.scraper import detect_ats_platform
             ats = job_data.get("ats_platform") or detect_ats_platform(job_url)
-            handler = self._get_handler(ats)
+            handler = self._get_handler(ats, resume_label)
             resume_path = session.get_resume_path(resume_label)
 
             await session.log(
@@ -546,7 +546,7 @@ class ApplicationAutomator:
         except Exception:
             pass
 
-    def _get_handler(self, ats: str):
+    def _get_handler(self, ats: str, role_label: str = ""):
         from handlers.workday import WorkdayHandler
         from handlers.greenhouse import GreenhouseHandler
         from handlers.lever import LeverHandler
@@ -556,13 +556,13 @@ class ApplicationAutomator:
         from handlers.bamboohr import BambooHRHandler
         from handlers.generic import GenericHandler
 
-        p, m = self.session.profile, self.session.mode
+        p, m, r = self.session.profile, self.session.mode, role_label
         ats_lower = ats.lower()
-        if "workday" in ats_lower:   return WorkdayHandler(p, m)
-        if "greenhouse" in ats_lower: return GreenhouseHandler(p, m)
-        if "lever" in ats_lower:     return LeverHandler(p, m)
-        if "icims" in ats_lower:     return ICIMSHandler(p, m)
-        if "smartrecruiter" in ats_lower: return SmartRecruitersHandler(p, m)
-        if "ashby" in ats_lower:     return AshbyHandler(p, m)
-        if "bamboo" in ats_lower:    return BambooHRHandler(p, m)
-        return GenericHandler(p, m)
+        if "workday" in ats_lower:        return WorkdayHandler(p, m, r)
+        if "greenhouse" in ats_lower:     return GreenhouseHandler(p, m, r)
+        if "lever" in ats_lower:          return LeverHandler(p, m, r)
+        if "icims" in ats_lower:          return ICIMSHandler(p, m, r)
+        if "smartrecruiter" in ats_lower: return SmartRecruitersHandler(p, m, r)
+        if "ashby" in ats_lower:          return AshbyHandler(p, m, r)
+        if "bamboo" in ats_lower:         return BambooHRHandler(p, m, r)
+        return GenericHandler(p, m, r)

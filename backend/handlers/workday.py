@@ -88,7 +88,7 @@ class WorkdayHandler(ATSHandler):
         Scan the current Workday page, map profile data, fill auto-mapped fields.
         Returns list of FormField with filled/needs_review set.
         """
-        mapper = FieldMapper(self.profile)
+        mapper = FieldMapper(self.profile, self._role_config)
         fields: list[FormField] = []
         filled_names: set[str] = set()
 
