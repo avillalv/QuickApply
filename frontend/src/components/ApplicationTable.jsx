@@ -83,11 +83,11 @@ function ExpandedRow({ app }) {
                 </div>
               )}
             </div>
-            {app.answers && Object.keys(app.answers).length > 0 && (
+            {app.answers_given && Object.keys(app.answers_given).length > 0 && (
               <div className="mt-3">
                 <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Answers Given</h4>
                 <div className="space-y-1.5 max-h-32 overflow-y-auto">
-                  {Object.entries(app.answers).map(([q, a]) => (
+                  {Object.entries(app.answers_given).map(([q, a]) => (
                     <div key={q} className="bg-gray-900 rounded px-2.5 py-1.5">
                       <p className="text-gray-500 text-xs">{q}</p>
                       <p className="text-gray-300 text-xs mt-0.5">{a}</p>

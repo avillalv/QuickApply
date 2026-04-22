@@ -68,20 +68,15 @@ export default function JobCard({ analysis, jobData, onApply }) {
             <MapPin size={12} /> {jobData.location}
           </span>
         )}
-        {(jobData.salary_min || jobData.salary_max) && (
+        {jobData.salary_range && (
           <span className="inline-flex items-center gap-1.5 text-gray-400 text-xs">
             <DollarSign size={12} />
-            {jobData.salary_min && jobData.salary_max
-              ? `$${Number(jobData.salary_min).toLocaleString()} – $${Number(jobData.salary_max).toLocaleString()}`
-              : jobData.salary_min
-              ? `$${Number(jobData.salary_min).toLocaleString()}+`
-              : `up to $${Number(jobData.salary_max).toLocaleString()}`
-            }
+            {jobData.salary_range}
           </span>
         )}
-        {analysis.estimated_time_minutes && (
+        {analysis.estimated_apply_time && (
           <span className="inline-flex items-center gap-1.5 text-gray-400 text-xs">
-            <Clock size={12} /> ~{analysis.estimated_time_minutes} min
+            <Clock size={12} /> ~{analysis.estimated_apply_time}
           </span>
         )}
       </div>
