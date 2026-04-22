@@ -1,10 +1,14 @@
 import os
+import shutil
+from pathlib import Path
 from typing import List
 
 from fastapi import APIRouter
 
 from database import get_supabase
 from models import SettingItem
+
+_PROFILES_DIR = Path(os.path.expanduser("~/.quickapply/profiles"))
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -63,3 +67,12 @@ async def test_connections():
         results["anthropic"] = {"status": "error", "message": str(exc)}
 
     return results
+
+
+@router.post("/clear-browser-session")
+async def clear_browser_session(channel: str = "chromium"):
+    name = channel.strip() or "chromium"
+    profile_dir = _PROFILES_DIR / name
+    if profile_dir.exists():
+        shutil.rmtree(profile_dir)
+    return {"status": "cleared", "channel": name}

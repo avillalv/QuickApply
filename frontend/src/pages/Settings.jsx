@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
-import { Eye, EyeOff, CheckCircle, XCircle, Loader2, Save, Bot, BotOff } from 'lucide-react'
-import { getSettings, updateSettings, testConnections } from '../api/client.js'
+import { Eye, EyeOff, CheckCircle, XCircle, Loader2, Save, Bot, BotOff, Trash2 } from 'lucide-react'
+import { getSettings, updateSettings, testConnections, clearBrowserSession } from '../api/client.js'
 
 function Section({ title, children }) {
   return (
@@ -84,6 +84,7 @@ export default function Settings() {
     supabase_url: '',
     supabase_anon_key: '',
     default_mode: 'copilot',
+    browser_channel: '',
     browser_visible: 'true',
     auto_submit: 'false',
     typing_speed_ms: '35',
@@ -96,6 +97,8 @@ export default function Settings() {
   const [testing, setTesting] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [clearing, setClearing] = useState(false)
+  const [cleared, setCleared] = useState(false)
 
   useEffect(() => {
     getSettings().then(data => {
@@ -133,6 +136,20 @@ export default function Settings() {
       })
     } finally {
       setTesting(false)
+    }
+  }
+
+  async function handleClearSession() {
+    setClearing(true)
+    setCleared(false)
+    try {
+      await clearBrowserSession(s.browser_channel || 'chromium')
+      setCleared(true)
+      setTimeout(() => setCleared(false), 3000)
+    } catch (err) {
+      console.error('Clear failed:', err)
+    } finally {
+      setClearing(false)
     }
   }
 
@@ -225,6 +242,35 @@ export default function Settings() {
                 {label}
               </button>
             ))}
+          </div>
+        </Field>
+
+        <Field label="Browser Engine" hint="Sessions persist between runs — log in once, stay logged in.">
+          <select
+            value={s.browser_channel || ''}
+            onChange={e => set('browser_channel', e.target.value)}
+            className="bg-gray-800 border border-gray-700 focus:border-indigo-500 rounded-lg px-3 py-2.5 text-sm text-white outline-none"
+          >
+            <option value="">Chromium (built-in — always works)</option>
+            <option value="chrome">Google Chrome (must be installed)</option>
+            <option value="msedge">Microsoft Edge (must be installed)</option>
+          </select>
+          <div className="flex items-center gap-3 mt-2">
+            <p className="text-xs text-gray-600 flex-1">
+              {s.browser_channel === 'msedge'
+                ? 'Uses a separate Edge profile managed by QuickApply — not your personal Edge profile.'
+                : s.browser_channel === 'chrome'
+                ? 'Uses a separate Chrome profile managed by QuickApply — not your personal Chrome profile.'
+                : 'Uses the bundled Playwright Chromium browser.'}
+            </p>
+            <button
+              onClick={handleClearSession}
+              disabled={clearing}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white rounded-lg transition-all shrink-0"
+            >
+              {clearing ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
+              {cleared ? 'Cleared!' : 'Clear Saved Logins'}
+            </button>
           </div>
         </Field>
 

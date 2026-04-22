@@ -10,7 +10,17 @@ import asyncio
 import os
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
+_PROFILES_DIR = Path(os.path.expanduser("~/.quickapply/profiles"))
+
+
+def _browser_profile_dir(channel: str) -> str:
+    name = channel.strip() or "chromium"
+    path = _PROFILES_DIR / name
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 from fastapi import WebSocket
 
@@ -285,21 +295,20 @@ class ApplicationAutomator:
 
             headless = session.settings.get("browser_visible", "true") != "true"
             typing_delay = int(session.settings.get("typing_speed_ms", "35"))
+            browser_channel = session.settings.get("browser_channel", "").strip()
             handler.typing_delay = typing_delay
 
             from playwright.async_api import async_playwright
             async with async_playwright() as pw:
-                browser = await pw.chromium.launch(
+                profile_dir = _browser_profile_dir(browser_channel)
+                launch_kwargs: dict = dict(
                     headless=headless,
                     args=[
                         "--no-sandbox",
                         "--disable-blink-features=AutomationControlled",
-                        "--disable-web-security",
                         "--no-first-run",
                         "--no-default-browser-check",
                     ],
-                )
-                context = await browser.new_context(
                     user_agent=(
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -308,6 +317,21 @@ class ApplicationAutomator:
                     viewport={"width": 1280, "height": 900},
                     ignore_https_errors=True,
                 )
+                if browser_channel:
+                    launch_kwargs["channel"] = browser_channel
+
+                try:
+                    context = await pw.chromium.launch_persistent_context(
+                        profile_dir, **launch_kwargs
+                    )
+                except Exception as launch_err:
+                    if "lock" in str(launch_err).lower() or "already" in str(launch_err).lower():
+                        raise RuntimeError(
+                            f"Browser profile is already in use. "
+                            f"Close any other {browser_channel or 'Chromium'} windows opened by QuickApply and retry."
+                        ) from launch_err
+                    raise
+
                 await context.add_init_script(
                     "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
                 )
@@ -332,7 +356,7 @@ class ApplicationAutomator:
                         "application_id": session.application_id,
                         "text": "Already applied for this job.",
                     })
-                    await browser.close()
+                    await context.close()
                     session.status = "complete"
                     return {"success": False, "status": "already_applied"}
 
@@ -356,7 +380,7 @@ class ApplicationAutomator:
                     })
                     result = await session.wait_for_user()
                     if result.get("action") == "abort":
-                        await browser.close()
+                        await context.close()
                         session.status = "aborted"
                         return {"success": False, "status": "aborted"}
                     await _wait_for_page_stable(page)
@@ -386,7 +410,7 @@ class ApplicationAutomator:
                         })
                         result = await session.wait_for_user()
                         if result.get("action") == "abort":
-                            await browser.close()
+                            await context.close()
                             session.status = "aborted"
                             return {"success": False, "status": "aborted"}
                         await _wait_for_page_stable(page)
@@ -401,7 +425,7 @@ class ApplicationAutomator:
                             "application_id": session.application_id,
                             "text": "Application submitted! Saved to Tracker.",
                         })
-                        await browser.close()
+                        await context.close()
                         session.status = "complete"
                         return {"success": True, "status": "complete"}
 
@@ -434,7 +458,7 @@ class ApplicationAutomator:
                         result = await session.wait_for_user()
                         if result.get("action") == "abort":
                             await session.broadcast({"type": "aborted"})
-                            await browser.close()
+                            await context.close()
                             session.status = "aborted"
                             return {"success": False, "status": "aborted"}
 
@@ -481,7 +505,7 @@ class ApplicationAutomator:
                         "application_id": session.application_id,
                         "text": "Application submitted! Saved to Tracker.",
                     })
-                    await browser.close()
+                    await context.close()
                     session.status = "complete"
                     return {"success": True, "status": "complete"}
 
@@ -496,7 +520,7 @@ class ApplicationAutomator:
                     result = await session.wait_for_user()
                     if result.get("action") == "abort":
                         await session.broadcast({"type": "aborted"})
-                        await browser.close()
+                        await context.close()
                         session.status = "aborted"
                         return {"success": False, "status": "aborted"}
 
@@ -522,7 +546,6 @@ class ApplicationAutomator:
                 })
 
                 await context.close()
-                await browser.close()
                 session.status = "complete"
                 return {"success": submitted, "status": "complete"}
 

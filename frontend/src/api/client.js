@@ -155,3 +155,11 @@ export async function testConnections() {
   const res = await fetch(`${BASE_URL}/settings/test-connections`, { method: 'POST' })
   return handleResponse(res)
 }
+
+export async function clearBrowserSession(channel = 'chromium') {
+  const res = await fetch(
+    `${BASE_URL}/settings/clear-browser-session?channel=${encodeURIComponent(channel)}`,
+    { method: 'POST' }
+  )
+  return handleResponse(res)
+}
