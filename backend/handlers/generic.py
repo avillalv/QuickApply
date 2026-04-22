@@ -1,92 +1,66 @@
 """
-GenericHandler — fallback ATS handler using fuzzy field-label matching.
-Used when no specific platform handler is matched.
+GenericHandler — fuzzy label-matching fallback for unknown ATS platforms.
 """
 import difflib
+import asyncio
 from handlers.base import ATSHandler, FormField
 from utils.field_mapper import FieldMapper
 
-# Maps common label fragments → profile keys
-_LABEL_TO_PROFILE = {
-    "first name": "first_name",
-    "last name": "last_name",
-    "full name": "full_name",
-    "name": "full_name",
-    "email": "email",
-    "phone": "phone",
-    "mobile": "phone",
-    "telephone": "phone",
+_LABEL_FRAGMENTS: dict[str, str] = {
+    "first name": "first_name", "first": "first_name",
+    "last name": "last_name", "last": "last_name",
+    "full name": "full_name", "name": "full_name",
+    "email": "email", "e-mail": "email",
+    "phone": "phone", "mobile": "phone", "telephone": "phone",
     "linkedin": "linkedin_url",
     "github": "github_url",
-    "portfolio": "portfolio_url",
-    "website": "portfolio_url",
-    "city": "city",
-    "state": "state",
-    "zip": "zip_code",
-    "postal": "zip_code",
-    "address": "city",
-    "location": "city",
+    "portfolio": "portfolio_url", "website": "portfolio_url",
+    "city": "city", "location": "city",
+    "state": "state", "province": "state",
+    "zip": "zip_code", "postal": "zip_code",
     "authorized": "work_authorized",
-    "work authorization": "work_authorized",
-    "sponsorship": "sponsorship_needed",
-    "visa": "sponsorship_needed",
-    "salary": "salary_expectation",
-    "compensation": "salary_expectation",
-    "expected salary": "salary_expectation",
-    "start date": "start_date",
-    "earliest start": "start_date",
+    "sponsorship": "sponsorship_needed", "visa": "sponsorship_needed",
+    "salary": "salary_expectation", "compensation": "salary_expectation",
+    "start date": "start_date", "available": "start_date",
     "relocate": "willing_to_relocate",
-    "relocation": "willing_to_relocate",
-    "school": "school",
-    "university": "school",
-    "college": "school",
-    "degree": "degree",
-    "major": "major",
+    "school": "school", "university": "school", "college": "school",
+    "degree": "degree", "education": "degree",
+    "major": "major", "field of study": "major",
     "gpa": "gpa",
-    "graduation": "graduation_date",
-    "graduate date": "graduation_date",
     "cover letter": "cover_letter_template",
-    "how did you hear": "how_did_you_hear",
-    "referral": "how_did_you_hear",
+    "gender": "gender",
+    "race": "race_ethnicity", "ethnicity": "race_ethnicity",
+    "veteran": "veteran_status",
+    "disability": "disability_status",
 }
 
 
-def _fuzzy_match_label(label: str) -> tuple[str | None, float]:
-    """Return (profile_key, confidence) for the best matching label."""
+def _fuzzy_label_match(label: str) -> tuple[str | None, float]:
     label_lower = label.lower().strip()
-
-    # Exact substring match first
-    for fragment, key in _LABEL_TO_PROFILE.items():
+    for fragment, key in _LABEL_FRAGMENTS.items():
         if fragment in label_lower:
             return key, 0.9
-
-    # Fuzzy match using difflib
-    candidates = list(_LABEL_TO_PROFILE.keys())
-    matches = difflib.get_close_matches(label_lower, candidates, n=1, cutoff=0.5)
+    matches = difflib.get_close_matches(label_lower, list(_LABEL_FRAGMENTS.keys()), n=1, cutoff=0.55)
     if matches:
-        key = _LABEL_TO_PROFILE[matches[0]]
+        key = _LABEL_FRAGMENTS[matches[0]]
         score = difflib.SequenceMatcher(None, label_lower, matches[0]).ratio()
         return key, score
-
     return None, 0.0
 
 
 class GenericHandler(ATSHandler):
-    """
-    Fallback handler that attempts to fill any ATS form using fuzzy label matching.
-    Marks fields with confidence < 0.6 as needing review.
-    """
 
     async def detect_platform(self, url: str) -> str:
         return "Custom ATS"
 
     async def navigate_to_apply(self, page) -> None:
-        apply_selectors = [
-            "a:has-text('Apply')", "button:has-text('Apply')",
+        selectors = [
             "a:has-text('Apply Now')", "button:has-text('Apply Now')",
-            "a[href*='apply']", "a[class*='apply']", "button[class*='apply']",
+            "a:has-text('Apply')", "button:has-text('Apply')",
+            "a[class*='apply']", "button[class*='apply']",
+            "a[href*='apply']",
         ]
-        for sel in apply_selectors:
+        for sel in selectors:
             try:
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
@@ -97,108 +71,114 @@ class GenericHandler(ATSHandler):
                 continue
 
     async def get_form_fields(self, page) -> list[FormField]:
-        fields = []
         mapper = FieldMapper(self.profile)
+        fields: list[FormField] = []
+        seen: set[str] = set()
 
         elements = await page.query_selector_all(
-            "input:not([type='hidden']):not([type='submit']):not([type='button']), "
+            "input:not([type='hidden']):not([type='submit']):not([type='button']):not([type='file']),"
             "textarea, select"
         )
 
-        seen_names: set[str] = set()
-
         for el in elements:
-            tag = await el.evaluate("el => el.tagName.toLowerCase()")
-            input_type = await el.evaluate("el => el.type || 'text'")
-            name = await el.evaluate("el => el.name || el.id || ''")
-            placeholder = await el.evaluate("el => el.placeholder || ''")
-            aria_label = await el.evaluate("el => el.getAttribute('aria-label') || ''")
-            required = await el.evaluate("el => el.required")
+            try:
+                if not await el.is_visible():
+                    continue
 
-            if name in seen_names:
-                continue
-            if name:
-                seen_names.add(name)
+                tag = await el.evaluate("e => e.tagName.toLowerCase()")
+                itype = await el.evaluate("e => e.type || 'text'")
+                name = await el.evaluate("e => e.name || e.id || ''")
+                placeholder = await el.evaluate("e => e.placeholder || ''")
+                required = await el.evaluate("e => e.required")
+                aria_label = await el.get_attribute("aria-label") or ""
 
-            # Find label text
-            label_text = await _get_label_text(page, el)
-            label = label_text or aria_label or placeholder or name
+                if name in seen or not name:
+                    # Still include nameless elements by index
+                    name = f"field_{len(fields)}"
 
-            field_type = "textarea" if tag == "textarea" else (
-                "select" if tag == "select" else input_type or "text"
-            )
+                seen.add(name)
 
-            # Skip purely decorative/search inputs
-            if field_type in ("search", "button", "image", "reset", "color", "range"):
-                continue
+                field_type = "select" if tag == "select" else (
+                    "textarea" if tag == "textarea" else itype or "text"
+                )
+                if field_type in ("submit", "button", "image", "reset", "search"):
+                    continue
 
-            ff = FormField(
-                name=name,
-                label=label,
-                field_type=field_type,
-                required=required,
-            )
+                label = await self._get_label_for_element(page, el)
+                label_text = label or aria_label or placeholder or name
 
-            # Try FieldMapper first (uses profile key mappings)
-            value, confidence = mapper.map_field(ff)
+                ff = FormField(
+                    name=name, label=label_text, field_type=field_type,
+                    required=required,
+                    selector=f"[name='{await el.evaluate('e => e.name')}']" if await el.evaluate("e => e.name") else None,
+                )
 
-            # If low confidence, try fuzzy label matching
-            if confidence < 0.6:
-                profile_key, fuzz_conf = _fuzzy_match_label(label)
-                if profile_key and fuzz_conf > confidence:
-                    value = _get_profile_value(self.profile, profile_key)
-                    confidence = fuzz_conf
+                # Try FieldMapper first
+                value, confidence = mapper.map_field(ff)
 
-            if value and confidence >= 0.6:
+                # Fall back to fuzzy label match
+                if confidence < 0.6:
+                    profile_key, fuzz_conf = _fuzzy_label_match(label_text)
+                    if profile_key and fuzz_conf > confidence:
+                        value = mapper._get_profile_value(profile_key)
+                        confidence = fuzz_conf
+
                 ff.value = value
-                ff.filled = True
-                ff.needs_review = False
-            else:
-                ff.needs_review = True
+                ff.confidence = confidence
 
-            fields.append(ff)
+                if value and confidence >= 0.6:
+                    try:
+                        sel_str = ff.selector or f"[name='{name}']"
+                        if field_type == "select":
+                            await self.handle_select(page, sel_str, value)
+                        elif field_type in ("checkbox", "radio"):
+                            await self.handle_radio_or_checkbox(page, name, value)
+                        else:
+                            await page.fill(sel_str, value)
+                        ff.filled = True
+                    except Exception:
+                        ff.needs_review = True
+                else:
+                    ff.needs_review = required or bool(label)
+
+                fields.append(ff)
+            except Exception:
+                continue
 
         return fields
 
     async def fill_field(self, page, form_field: FormField, value: str) -> None:
         if not value:
             return
-
-        sel = _build_selector(form_field)
-        if not sel:
-            return
-
-        await self.random_delay(200, 600)
-
         try:
+            sel = form_field.selector or f"[name='{form_field.name}']"
             if form_field.field_type == "select":
-                await self.handle_dropdown(page, sel, value)
+                await self.handle_select(page, sel, value)
             elif form_field.field_type in ("checkbox", "radio"):
-                el = await page.query_selector(sel)
-                if el and not await el.is_checked():
-                    await el.click()
+                await self.handle_radio_or_checkbox(page, form_field.name, value)
             else:
-                await self.human_type(page, sel, value)
+                await page.fill(sel, value)
         except Exception:
             pass
 
     async def upload_resume(self, page, file_path: str) -> None:
-        file_inputs = await page.query_selector_all("input[type='file']")
-        for inp in file_inputs:
+        inputs = await page.query_selector_all("input[type='file']")
+        for inp in inputs:
             try:
                 await inp.set_input_files(file_path)
-                await self.random_delay(500, 1000)
+                await asyncio.sleep(0.8)
                 return
             except Exception:
                 continue
 
     async def next_page(self, page) -> bool:
-        next_selectors = [
+        selectors = [
             "button:has-text('Next')", "button:has-text('Continue')",
-            "input[type='submit'][value*='Next']", "a:has-text('Next')",
-            "[data-action='next']",
+            "input[type='submit'][value*='Next']",
+            "a:has-text('Next')", "[data-action='next']",
+            "button:has-text('Save and Continue')",
         ]
-        for sel in next_selectors:
+        for sel in selectors:
             try:
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
@@ -210,12 +190,12 @@ class GenericHandler(ATSHandler):
         return False
 
     async def submit(self, page) -> bool:
-        submit_selectors = [
+        selectors = [
             "button[type='submit']", "input[type='submit']",
             "button:has-text('Submit')", "button:has-text('Apply')",
             "button:has-text('Submit Application')",
         ]
-        for sel in submit_selectors:
+        for sel in selectors:
             try:
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
@@ -225,41 +205,3 @@ class GenericHandler(ATSHandler):
             except Exception:
                 continue
         return False
-
-
-async def _get_label_text(page, element) -> str:
-    return await page.evaluate(
-        """el => {
-            const id = el.id;
-            if (id) {
-                const lbl = document.querySelector(`label[for="${id}"]`);
-                if (lbl) return lbl.innerText.trim();
-            }
-            const parent = el.closest('.form-group, .field-wrapper, .form-field, li');
-            if (parent) {
-                const lbl = parent.querySelector('label, .label, .field-label');
-                if (lbl) return lbl.innerText.trim();
-            }
-            const prev = el.previousElementSibling;
-            if (prev && ['LABEL', 'SPAN', 'P'].includes(prev.tagName)) {
-                return prev.innerText.trim();
-            }
-            return '';
-        }""",
-        element,
-    )
-
-
-def _build_selector(form_field: FormField) -> str:
-    if form_field.name:
-        return f"[name='{form_field.name}']"
-    return ""
-
-
-def _get_profile_value(profile: dict, key: str) -> str | None:
-    value = profile.get(key)
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return "Yes" if value else "No"
-    return str(value)

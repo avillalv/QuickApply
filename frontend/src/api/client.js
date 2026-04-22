@@ -9,14 +9,15 @@ async function handleResponse(res) {
         message = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
       }
     } catch {
-      // ignore parse error, use default message
+      // ignore parse error
     }
     throw new Error(message)
   }
-  // 204 No Content
   if (res.status === 204) return null
   return res.json()
 }
+
+// ─── Jobs ─────────────────────────────────────────────────────────────────────
 
 export async function analyzeJob(url) {
   const res = await fetch(`${BASE_URL}/jobs/analyze`, {
@@ -26,6 +27,35 @@ export async function analyzeJob(url) {
   })
   return handleResponse(res)
 }
+
+// ─── Automation ───────────────────────────────────────────────────────────────
+
+export async function startAutomation({ jobUrl, resumeLabel, mode, jobData, applicationId }) {
+  const res = await fetch(`${BASE_URL}/automation/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      job_url: jobUrl,
+      resume_label: resumeLabel,
+      mode,
+      job_data: jobData || {},
+      application_id: applicationId || null,
+    }),
+  })
+  return handleResponse(res)
+}
+
+export async function getAutomationStatus(sessionId) {
+  const res = await fetch(`${BASE_URL}/automation/${sessionId}`)
+  return handleResponse(res)
+}
+
+export async function abortAutomation(sessionId) {
+  const res = await fetch(`${BASE_URL}/automation/${sessionId}/abort`, { method: 'POST' })
+  return handleResponse(res)
+}
+
+// ─── Profile ──────────────────────────────────────────────────────────────────
 
 export async function getProfile() {
   const res = await fetch(`${BASE_URL}/profile`)
@@ -64,6 +94,8 @@ export async function deleteResume(label) {
   return handleResponse(res)
 }
 
+// ─── Applications ─────────────────────────────────────────────────────────────
+
 export async function getApplications(params = {}) {
   const query = new URLSearchParams()
   Object.entries(params).forEach(([k, v]) => {
@@ -93,9 +125,7 @@ export async function updateApplication(id, data) {
 }
 
 export async function deleteApplication(id) {
-  const res = await fetch(`${BASE_URL}/applications/${id}`, {
-    method: 'DELETE',
-  })
+  const res = await fetch(`${BASE_URL}/applications/${id}`, { method: 'DELETE' })
   return handleResponse(res)
 }
 
@@ -103,6 +133,8 @@ export async function getApplicationStats() {
   const res = await fetch(`${BASE_URL}/applications/stats/summary`)
   return handleResponse(res)
 }
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
 
 export async function getSettings() {
   const res = await fetch(`${BASE_URL}/settings`)
@@ -119,8 +151,6 @@ export async function updateSettings(settings) {
 }
 
 export async function testConnections() {
-  const res = await fetch(`${BASE_URL}/settings/test-connections`, {
-    method: 'POST',
-  })
+  const res = await fetch(`${BASE_URL}/settings/test-connections`, { method: 'POST' })
   return handleResponse(res)
 }

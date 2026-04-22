@@ -1,121 +1,198 @@
+"""
+Lever ATS handler (jobs.lever.co).
+Lever forms are single-page with consistent field names.
+"""
+import asyncio
 from handlers.base import ATSHandler, FormField
 from utils.field_mapper import FieldMapper
 
+# Lever uses these consistent name attributes
+LEVER_FIELDS: dict[str, str] = {
+    "name": "full_name",
+    "email": "email",
+    "phone": "phone",
+    "org": "school",                  # "Current company / school"
+    "location": "city",
+    "urls[LinkedIn]": "linkedin_url",
+    "urls[GitHub]": "github_url",
+    "urls[Portfolio]": "portfolio_url",
+    "urls[Other]": "portfolio_url",
+}
+
 
 class LeverHandler(ATSHandler):
-    """Handler for Lever ATS (jobs.lever.co)."""
 
     async def detect_platform(self, url: str) -> str:
         return "Lever"
 
     async def navigate_to_apply(self, page) -> None:
-        apply_selectors = [
+        selectors = [
             "a.postings-btn",
             "a:has-text('Apply for this job')",
+            "a:has-text('Apply for Job')",
             "a:has-text('Apply')",
-            "button:has-text('Apply')",
-            ".btn-primary",
+            ".apply-btn",
         ]
-        for sel in apply_selectors:
+        for sel in selectors:
             try:
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
-                    await el.click()
-                    await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    href = await el.get_attribute("href")
+                    if href and href.startswith("http"):
+                        await page.goto(href, timeout=15000, wait_until="domcontentloaded")
+                    else:
+                        await el.click()
+                        await page.wait_for_load_state("domcontentloaded", timeout=15000)
                     return
             except Exception:
                 continue
 
     async def get_form_fields(self, page) -> list[FormField]:
-        fields = []
         mapper = FieldMapper(self.profile)
+        fields: list[FormField] = []
+        filled_names: set[str] = set()
 
-        # Lever forms use ul.application-questions li.application-question
-        question_items = await page.query_selector_all(
-            "li.application-question, .application-field, .form-group"
-        )
-
-        for item in question_items:
-            label_el = await item.query_selector("label, .label")
-            label_text = ""
-            if label_el:
-                label_text = (await label_el.inner_text()).strip()
-
-            inp = await item.query_selector("input:not([type='hidden']), textarea, select")
-            if not inp:
+        # --- Known Lever fields ---
+        for name_attr, profile_key in LEVER_FIELDS.items():
+            el = await page.query_selector(
+                f"input[name='{name_attr}'], textarea[name='{name_attr}']"
+            )
+            if not el:
+                continue
+            try:
+                if not await el.is_visible():
+                    continue
+            except Exception:
                 continue
 
-            tag = await inp.evaluate("el => el.tagName.toLowerCase()")
-            input_type = await inp.evaluate("el => el.type || 'text'")
-            name = await inp.evaluate("el => el.name || el.id || ''")
-            required = await inp.evaluate("el => el.required")
-
-            field_type = "textarea" if tag == "textarea" else (
-                "select" if tag == "select" else input_type
-            )
+            tag = await el.evaluate("e => e.tagName.toLowerCase()")
+            field_type = "textarea" if tag == "textarea" else "text"
+            value = self._profile_value(profile_key)
+            required = bool(await el.get_attribute("required"))
 
             ff = FormField(
-                name=name,
-                label=label_text or name,
+                name=name_attr,
+                label=name_attr.replace("_", " ").replace("urls[", "").replace("]", "").title(),
                 field_type=field_type,
+                value=value,
                 required=required,
+                confidence=1.0 if value else 0.0,
+                selector=f"[name='{name_attr}']",
             )
-
-            value, confidence = mapper.map_field(ff)
-            if value and confidence >= 0.5:
-                ff.value = value
-                ff.filled = True
+            if value:
+                try:
+                    await page.fill(f"[name='{name_attr}']", value)
+                    ff.filled = True
+                except Exception:
+                    ff.needs_review = True
             else:
-                ff.needs_review = True
+                ff.needs_review = required
 
             fields.append(ff)
+            filled_names.add(name_attr)
 
-        # Also catch top-level inputs not in question containers
-        top_inputs = await page.query_selector_all(
-            "input[name='name'], input[name='email'], input[name='phone'], "
-            "input[name='org'], input[name='urls[LinkedIn]'], input[name='urls[GitHub]']"
+        # --- Lever custom questions (li.application-question) ---
+        question_items = await page.query_selector_all(
+            "li.application-question, .application-field, .custom-question"
         )
-        found_names = {f.name for f in fields}
+        for item in question_items:
+            try:
+                label_el = await item.query_selector(
+                    "label, .application-label, .field-label, legend"
+                )
+                label = (await label_el.inner_text()).strip() if label_el else ""
 
-        for inp in top_inputs:
-            name = await inp.evaluate("el => el.name || ''")
-            if name in found_names:
-                continue
-            input_type = await inp.evaluate("el => el.type || 'text'")
-            required = await inp.evaluate("el => el.required")
+                inp = await item.query_selector(
+                    "input:not([type='hidden']):not([type='file']), textarea, select"
+                )
+                if not inp:
+                    continue
 
-            ff = FormField(name=name, label=name, field_type=input_type, required=required)
-            value, confidence = mapper.map_field(ff)
-            if value and confidence >= 0.5:
+                name = await inp.get_attribute("name") or label
+                if name in filled_names:
+                    continue
+                if not await inp.is_visible():
+                    continue
+
+                tag = await inp.evaluate("e => e.tagName.toLowerCase()")
+                itype = await inp.evaluate("e => e.type || 'text'")
+                field_type = "select" if tag == "select" else ("textarea" if tag == "textarea" else itype)
+                required = bool(await inp.get_attribute("required"))
+
+                ff = FormField(
+                    name=name, label=label or name,
+                    field_type=field_type, required=required,
+                    selector=f"[name='{name}']" if name else None,
+                )
+                value, confidence = mapper.map_field(ff)
                 ff.value = value
-                ff.filled = True
-            else:
-                ff.needs_review = True
-            fields.append(ff)
+                ff.confidence = confidence
+
+                if value and confidence >= 0.6:
+                    try:
+                        if field_type == "select":
+                            await self.handle_select(page, ff.selector, value)
+                        elif field_type in ("checkbox", "radio"):
+                            await self.handle_radio_or_checkbox(page, name, value)
+                        else:
+                            await page.fill(ff.selector, value)
+                        ff.filled = True
+                    except Exception:
+                        ff.needs_review = True
+                else:
+                    ff.needs_review = required or bool(label)
+
+                fields.append(ff)
+                filled_names.add(name)
+            except Exception:
+                continue
+
+        # --- Cover letter textarea ---
+        for sel in ["textarea[name='comments']", "textarea.cards-textarea", "textarea"]:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    name = await el.get_attribute("name") or "cover_letter"
+                    if name not in filled_names:
+                        value = self._profile_value("cover_letter_template")
+                        ff = FormField(
+                            name=name, label="Cover Letter", field_type="textarea",
+                            value=value, confidence=0.9 if value else 0.0,
+                            selector=sel,
+                        )
+                        if value:
+                            await page.fill(sel, value)
+                            ff.filled = True
+                        else:
+                            ff.needs_review = True
+                        fields.append(ff)
+                        filled_names.add(name)
+                        break
+            except Exception:
+                continue
 
         return fields
 
     async def fill_field(self, page, form_field: FormField, value: str) -> None:
-        if not value or not form_field.name:
+        if not value:
             return
-
-        sel = f"[name='{form_field.name}']"
-        await self.random_delay(150, 450)
-
-        if form_field.field_type == "select":
-            await self.handle_dropdown(page, sel, value)
-        elif form_field.field_type in ("checkbox", "radio"):
-            el = await page.query_selector(sel)
-            if el and not await el.is_checked():
-                await el.click()
-        else:
-            await self.human_type(page, sel, value)
+        try:
+            sel = form_field.selector or f"[name='{form_field.name}']"
+            if form_field.field_type == "select":
+                await self.handle_select(page, sel, value)
+            elif form_field.field_type in ("checkbox", "radio"):
+                await self.handle_radio_or_checkbox(page, form_field.name, value)
+            else:
+                await page.fill(sel, value)
+        except Exception:
+            pass
 
     async def upload_resume(self, page, file_path: str) -> None:
         selectors = [
             "input[type='file'][name*='resume']",
             "input[type='file'][name='cards[resume]']",
             "input[type='file'][accept*='pdf']",
+            ".resume-upload input[type='file']",
             "input[type='file']",
         ]
         for sel in selectors:
@@ -123,24 +200,23 @@ class LeverHandler(ATSHandler):
                 el = await page.query_selector(sel)
                 if el:
                     await el.set_input_files(file_path)
-                    await self.random_delay(500, 1000)
+                    await asyncio.sleep(0.8)
                     return
             except Exception:
                 continue
 
     async def next_page(self, page) -> bool:
-        # Lever forms are single-page; clicking submit completes the application
-        return False
+        return False  # Lever is single-page
 
     async def submit(self, page) -> bool:
-        submit_selectors = [
+        selectors = [
             "button.template-btn-submit",
-            "button[type='submit']",
             ".submit-app-btn",
+            "button[type='submit']",
             "button:has-text('Submit application')",
             "button:has-text('Submit')",
         ]
-        for sel in submit_selectors:
+        for sel in selectors:
             try:
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():

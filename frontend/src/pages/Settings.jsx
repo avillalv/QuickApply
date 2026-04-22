@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react'
-import { Eye, EyeOff, CheckCircle, XCircle, Loader2, Save } from 'lucide-react'
+import { Eye, EyeOff, CheckCircle, XCircle, Loader2, Save, Bot, BotOff } from 'lucide-react'
 import { getSettings, updateSettings, testConnections } from '../api/client.js'
 
 function Section({ title, children }) {
   return (
     <div className="bg-gray-900 border border-gray-700/60 rounded-xl p-6 mb-4">
-      <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider mb-5">{title}</h2>
+      <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-5">{title}</h2>
       {children}
     </div>
   )
@@ -13,11 +13,23 @@ function Section({ title, children }) {
 
 function Field({ label, hint, children }) {
   return (
-    <div className="flex flex-col gap-1.5 mb-4">
-      <label className="text-sm font-medium text-gray-300">{label}</label>
-      {hint && <p className="text-xs text-gray-600">{hint}</p>}
+    <div className="mb-4">
+      <label className="block text-sm font-medium text-gray-300 mb-1">{label}</label>
+      {hint && <p className="text-xs text-gray-600 mb-1.5">{hint}</p>}
       {children}
     </div>
+  )
+}
+
+function TextInput({ value, onChange, placeholder, mono }) {
+  return (
+    <input
+      type="text"
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      placeholder={placeholder}
+      className={`w-full bg-gray-800 border border-gray-700 focus:border-indigo-500 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 outline-none transition-all ${mono ? 'font-mono' : ''}`}
+    />
   )
 }
 
@@ -45,25 +57,21 @@ function SecretInput({ value, onChange, placeholder }) {
 
 function Toggle({ checked, onChange, label, danger }) {
   return (
-    <button
-      type="button"
-      onClick={() => onChange(!checked)}
-      className="flex items-center gap-3"
-    >
-      <div className={`relative w-10 h-5 rounded-full transition-colors ${checked ? (danger ? 'bg-red-600' : 'bg-indigo-600') : 'bg-gray-700'}`}>
-        <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${checked ? 'translate-x-5' : 'translate-x-0'}`} />
+    <button type="button" onClick={() => onChange(!checked)} className="flex items-center gap-3">
+      <div className={`relative w-10 rounded-full transition-colors ${checked ? (danger ? 'bg-red-600' : 'bg-indigo-600') : 'bg-gray-700'}`} style={{ height: 22 }}>
+        <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${checked ? 'translate-x-5' : 'translate-x-0.5'}`} style={{ left: 2 }} />
       </div>
       {label && <span className={`text-sm ${danger && checked ? 'text-red-400 font-medium' : 'text-gray-300'}`}>{label}</span>}
     </button>
   )
 }
 
-function ConnectionStatus({ status }) {
+function ConnStatus({ status }) {
   if (!status) return null
   const ok = status.status === 'ok'
   return (
-    <div className={`flex items-center gap-2 text-xs mt-1 ${ok ? 'text-green-400' : 'text-red-400'}`}>
-      {ok ? <CheckCircle size={12} /> : <XCircle size={12} />}
+    <div className={`flex items-center gap-1.5 text-xs mt-1 ${ok ? 'text-green-400' : 'text-red-400'}`}>
+      {ok ? <CheckCircle size={11} /> : <XCircle size={11} />}
       {status.message}
     </div>
   )
@@ -71,13 +79,14 @@ function ConnectionStatus({ status }) {
 
 export default function Settings() {
   const [s, setS] = useState({
+    use_ai: 'false',
     anthropic_api_key: '',
     supabase_url: '',
     supabase_anon_key: '',
     default_mode: 'copilot',
     browser_visible: 'true',
     auto_submit: 'false',
-    typing_speed_ms: '75',
+    typing_speed_ms: '60',
     page_load_timeout: '30',
     anthropic_model: 'claude-sonnet-4-20250514',
     desktop_notifications: 'true',
@@ -102,29 +111,32 @@ export default function Settings() {
     setSaving(true)
     setSaved(false)
     try {
-      const items = Object.entries(s).map(([key, value]) => ({ key, value: String(value) }))
-      await updateSettings(items)
+      await updateSettings(Object.entries(s).map(([key, value]) => ({ key, value: String(value) })))
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch (err) {
-      console.error('Failed to save settings:', err)
+      console.error('Save failed:', err)
     } finally {
       setSaving(false)
     }
   }
 
-  async function handleTestConnections() {
+  async function handleTest() {
     setTesting(true)
     setConnStatus(null)
     try {
-      const result = await testConnections()
-      setConnStatus(result)
+      setConnStatus(await testConnections())
     } catch {
-      setConnStatus({ supabase: { status: 'error', message: 'Request failed' }, anthropic: { status: 'error', message: 'Request failed' } })
+      setConnStatus({
+        supabase: { status: 'error', message: 'Request failed' },
+        anthropic: { status: 'error', message: 'Request failed' },
+      })
     } finally {
       setTesting(false)
     }
   }
+
+  const aiEnabled = s.use_ai === 'true'
 
   return (
     <div className="min-h-screen p-6 max-w-2xl mx-auto">
@@ -133,40 +145,70 @@ export default function Settings() {
         <p className="text-gray-500 text-sm mt-1">Configure API keys, automation behavior, and preferences.</p>
       </div>
 
+      {/* AI Toggle — prominent at top */}
+      <div className={`flex items-start gap-4 p-5 rounded-xl border mb-4 ${aiEnabled ? 'bg-indigo-500/10 border-indigo-500/30' : 'bg-gray-900 border-gray-700/60'}`}>
+        <div className={`p-2 rounded-lg ${aiEnabled ? 'bg-indigo-600/20' : 'bg-gray-800'}`}>
+          {aiEnabled ? <Bot size={20} className="text-indigo-400" /> : <BotOff size={20} className="text-gray-500" />}
+        </div>
+        <div className="flex-1">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-semibold text-white">Anthropic AI Features</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {aiEnabled
+                  ? 'Job analysis and Q&A powered by Claude (uses API credits)'
+                  : 'Using keyword matching + profile templates — no API cost'
+                }
+              </p>
+            </div>
+            <Toggle
+              checked={aiEnabled}
+              onChange={v => set('use_ai', String(v))}
+            />
+          </div>
+        </div>
+      </div>
+
       <Section title="API Configuration">
-        <Field label="Anthropic API Key" hint="Used for job analysis and question answering.">
-          <SecretInput value={s.anthropic_api_key} onChange={v => set('anthropic_api_key', v)} placeholder="sk-ant-..." />
+        <Field
+          label="Anthropic API Key"
+          hint={aiEnabled ? 'Used for job analysis and question answering.' : 'Not needed — AI features are off.'}
+        >
+          <SecretInput
+            value={s.anthropic_api_key}
+            onChange={v => set('anthropic_api_key', v)}
+            placeholder="sk-ant-..."
+          />
         </Field>
         <Field label="Supabase URL">
-          <input
-            type="text"
+          <TextInput
             value={s.supabase_url}
-            onChange={e => set('supabase_url', e.target.value)}
+            onChange={v => set('supabase_url', v)}
             placeholder="https://your-project.supabase.co"
-            className="w-full bg-gray-800 border border-gray-700 focus:border-indigo-500 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 outline-none transition-all font-mono"
+            mono
           />
         </Field>
         <Field label="Supabase Anon Key">
-          <SecretInput value={s.supabase_anon_key} onChange={v => set('supabase_anon_key', v)} placeholder="eyJ..." />
+          <SecretInput
+            value={s.supabase_anon_key}
+            onChange={v => set('supabase_anon_key', v)}
+            placeholder="eyJ..."
+          />
         </Field>
 
         <button
-          onClick={handleTestConnections}
+          onClick={handleTest}
           disabled={testing}
-          className="flex items-center gap-2 px-4 py-2 text-sm bg-gray-800 hover:bg-gray-700 border border-gray-600 text-gray-300 hover:text-white rounded-lg transition-all mt-2"
+          className="flex items-center gap-2 px-4 py-2 text-sm bg-gray-800 hover:bg-gray-700 border border-gray-600 text-gray-300 hover:text-white rounded-lg transition-all mt-1"
         >
-          {testing ? <Loader2 size={13} className="animate-spin" /> : null}
+          {testing && <Loader2 size={13} className="animate-spin" />}
           Test Connections
         </button>
 
         {connStatus && (
           <div className="mt-3 space-y-1">
-            <div className="flex items-center gap-2 text-sm text-gray-400">
-              Supabase: <ConnectionStatus status={connStatus.supabase} />
-            </div>
-            <div className="flex items-center gap-2 text-sm text-gray-400">
-              Anthropic: <ConnectionStatus status={connStatus.anthropic} />
-            </div>
+            <p className="text-xs text-gray-500">Supabase: <ConnStatus status={connStatus.supabase} /></p>
+            <p className="text-xs text-gray-500">Anthropic: <ConnStatus status={connStatus.anthropic} /></p>
           </div>
         )}
       </Section>
@@ -174,13 +216,13 @@ export default function Settings() {
       <Section title="Automation Settings">
         <Field label="Default Mode">
           <div className="flex gap-3">
-            {['full_auto', 'copilot'].map(mode => (
+            {[['copilot', 'Co-Pilot (recommended)'], ['full_auto', 'Full Auto']].map(([val, label]) => (
               <button
-                key={mode}
-                onClick={() => set('default_mode', mode)}
-                className={`px-4 py-2 rounded-lg text-sm font-medium border transition-all ${s.default_mode === mode ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500'}`}
+                key={val}
+                onClick={() => set('default_mode', val)}
+                className={`px-4 py-2 rounded-lg text-sm font-medium border transition-all ${s.default_mode === val ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300' : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500'}`}
               >
-                {mode === 'full_auto' ? 'Full Auto' : 'Co-Pilot'}
+                {label}
               </button>
             ))}
           </div>
@@ -190,60 +232,59 @@ export default function Settings() {
           <Toggle
             checked={s.browser_visible === 'true'}
             onChange={v => set('browser_visible', String(v))}
-            label={s.browser_visible === 'true' ? 'Always visible' : 'Background (headless)'}
+            label={s.browser_visible === 'true' ? 'Visible (watch the automation)' : 'Headless (background)'}
           />
         </Field>
 
-        <Field label="Auto-Submit" hint="Safety switch — if off, always pauses before submitting even in Full Auto mode.">
+        <Field label="Auto-Submit" hint="Safety switch — if off, always pauses before submitting.">
           <Toggle
             checked={s.auto_submit === 'true'}
             onChange={v => set('auto_submit', String(v))}
-            label={s.auto_submit === 'true' ? 'Auto-submit enabled (caution!)' : 'Pauses before submit'}
+            label={s.auto_submit === 'true' ? 'Auto-submit enabled' : 'Pauses before submit (safer)'}
             danger
           />
         </Field>
 
-        <Field label={`Typing Speed: ${s.typing_speed_ms}ms per character`} hint="Slower = more human-like, less likely to trigger bot detection.">
+        <Field label={`Typing Speed: ${s.typing_speed_ms}ms / char`} hint="Lower = faster. Higher = more human-like.">
           <input
-            type="range"
-            min="20"
-            max="200"
-            step="5"
+            type="range" min="20" max="150" step="5"
             value={s.typing_speed_ms}
             onChange={e => set('typing_speed_ms', e.target.value)}
             className="w-full accent-indigo-500"
           />
           <div className="flex justify-between text-xs text-gray-600 mt-1">
-            <span>20ms (fast)</span>
-            <span>200ms (slow)</span>
+            <span>20ms fast</span>
+            <span>150ms slow</span>
           </div>
         </Field>
 
-        <Field label="Page Load Timeout (seconds)" hint="Workday often needs 30+ seconds.">
+        <Field label="Page Load Timeout (seconds)">
           <input
-            type="number"
-            min="10"
-            max="120"
+            type="number" min="10" max="120"
             value={s.page_load_timeout}
             onChange={e => set('page_load_timeout', e.target.value)}
-            className="w-32 bg-gray-800 border border-gray-700 focus:border-indigo-500 rounded-lg px-3 py-2 text-sm text-white outline-none transition-all mono"
+            className="w-28 bg-gray-800 border border-gray-700 focus:border-indigo-500 rounded-lg px-3 py-2 text-sm text-white outline-none mono"
           />
         </Field>
       </Section>
 
-      <Section title="Application Settings">
-        <Field label="Anthropic Model">
-          <select
-            value={s.anthropic_model}
-            onChange={e => set('anthropic_model', e.target.value)}
-            className="bg-gray-800 border border-gray-700 focus:border-indigo-500 rounded-lg px-3 py-2.5 text-sm text-white outline-none transition-all"
-          >
-            <option value="claude-sonnet-4-20250514">claude-sonnet-4-20250514 (recommended)</option>
-            <option value="claude-opus-4-5-20251101">claude-opus-4-5-20251101 (highest quality)</option>
-            <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001 (fastest)</option>
-          </select>
-        </Field>
+      {aiEnabled && (
+        <Section title="AI Settings">
+          <Field label="Anthropic Model">
+            <select
+              value={s.anthropic_model}
+              onChange={e => set('anthropic_model', e.target.value)}
+              className="bg-gray-800 border border-gray-700 focus:border-indigo-500 rounded-lg px-3 py-2.5 text-sm text-white outline-none"
+            >
+              <option value="claude-sonnet-4-20250514">claude-sonnet-4-20250514 (recommended)</option>
+              <option value="claude-opus-4-5-20251101">claude-opus-4-5-20251101 (highest quality)</option>
+              <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001 (fastest/cheapest)</option>
+            </select>
+          </Field>
+        </Section>
+      )}
 
+      <Section title="Other Settings">
         <Field label="Desktop Notifications">
           <Toggle
             checked={s.desktop_notifications === 'true'}
@@ -251,20 +292,17 @@ export default function Settings() {
             label="Notify on completion and errors"
           />
         </Field>
-
-        <Field label="Max Applications Per Hour" hint="Rate limit per ATS platform to avoid detection.">
+        <Field label="Max Applications Per Hour">
           <input
-            type="number"
-            min="1"
-            max="20"
+            type="number" min="1" max="20"
             value={s.max_apps_per_hour}
             onChange={e => set('max_apps_per_hour', e.target.value)}
-            className="w-32 bg-gray-800 border border-gray-700 focus:border-indigo-500 rounded-lg px-3 py-2 text-sm text-white outline-none transition-all mono"
+            className="w-28 bg-gray-800 border border-gray-700 focus:border-indigo-500 rounded-lg px-3 py-2 text-sm text-white outline-none mono"
           />
         </Field>
       </Section>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 pb-8">
         <button
           onClick={handleSave}
           disabled={saving}
@@ -273,7 +311,11 @@ export default function Settings() {
           {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
           {saving ? 'Saving…' : 'Save Settings'}
         </button>
-        {saved && <span className="text-green-400 text-sm flex items-center gap-1"><CheckCircle size={14} /> Saved!</span>}
+        {saved && (
+          <span className="text-green-400 text-sm flex items-center gap-1">
+            <CheckCircle size={14} /> Saved!
+          </span>
+        )}
       </div>
     </div>
   )

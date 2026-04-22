@@ -1,242 +1,476 @@
-import React, { useState, useEffect, useRef } from 'react'
-import { CheckCircle, AlertTriangle, X, ChevronRight, Pause, Zap, Loader2 } from 'lucide-react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
+import {
+  CheckCircle, AlertTriangle, X, ChevronRight, Pause, Play,
+  Zap, Loader2, Terminal, Send, XCircle,
+} from 'lucide-react'
 import clsx from 'clsx'
 
-const WS_URL = 'ws://localhost:8000/ws'
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-export default function AutomationOverlay({ mode, analysis, jobData, onClose }) {
-  const [wsStatus, setWsStatus] = useState('connecting') // connecting | connected | disconnected
-  const [step, setStep] = useState({ current: 1, total: 1, label: 'Initializing…' })
-  const [filledFields, setFilledFields] = useState([])
-  const [reviewFields, setReviewFields] = useState([])
-  const [reviewValues, setReviewValues] = useState({})
-  const [paused, setPaused] = useState(false)
+function FieldRow({ field, onEdit }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(field.value || '')
+
+  function commit() {
+    setEditing(false)
+    if (draft !== field.value) onEdit(field.name, draft)
+  }
+
+  const isGreen = field.filled && !field.needs_review
+  const isYellow = field.needs_review
+
+  return (
+    <div className={clsx(
+      'flex items-start gap-2 px-3 py-2 rounded-lg text-xs border',
+      isGreen ? 'bg-green-500/5 border-green-500/20' : 'bg-yellow-500/5 border-yellow-500/25',
+    )}>
+      <div className="mt-0.5 shrink-0">
+        {isGreen
+          ? <CheckCircle size={12} className="text-green-500" />
+          : <AlertTriangle size={12} className="text-yellow-500" />
+        }
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className={clsx('font-medium truncate', isGreen ? 'text-green-300' : 'text-yellow-300')}>
+          {field.label}
+        </p>
+        {editing ? (
+          <div className="flex gap-1 mt-1">
+            {field.field_type === 'textarea' ? (
+              <textarea
+                autoFocus
+                rows={2}
+                value={draft}
+                onChange={e => setDraft(e.target.value)}
+                className="flex-1 bg-gray-900 border border-yellow-500/50 rounded px-2 py-1 text-xs text-white resize-none outline-none"
+              />
+            ) : (
+              <input
+                autoFocus
+                type="text"
+                value={draft}
+                onChange={e => setDraft(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false) }}
+                className="flex-1 bg-gray-900 border border-yellow-500/50 rounded px-2 py-1 text-xs text-white outline-none"
+              />
+            )}
+            <button onClick={commit} className="text-green-400 hover:text-green-300 px-1">✓</button>
+            <button onClick={() => setEditing(false)} className="text-gray-500 hover:text-gray-300 px-1">✕</button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setEditing(true)}
+            className={clsx(
+              'mt-0.5 text-left w-full truncate',
+              field.value ? 'text-gray-300' : 'text-gray-600 italic',
+            )}
+          >
+            {field.value || 'Click to fill…'}
+          </button>
+        )}
+      </div>
+      {!editing && (
+        <button
+          onClick={() => setEditing(true)}
+          className="text-gray-600 hover:text-gray-400 transition-colors shrink-0 text-xs"
+        >
+          edit
+        </button>
+      )}
+    </div>
+  )
+}
+
+function LogEntry({ entry }) {
+  const colors = {
+    info: 'text-gray-500',
+    warn: 'text-yellow-600',
+    error: 'text-red-500',
+    success: 'text-green-500',
+  }
+  return (
+    <div className={clsx('text-xs flex items-start gap-1.5', colors[entry.level] || colors.info)}>
+      <span className="mono shrink-0 text-gray-700">{entry.ts}</span>
+      <span>{entry.text}</span>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
+
+export default function AutomationOverlay({ sessionId, mode, analysis, jobData, onClose }) {
+  const [wsStatus, setWsStatus] = useState('connecting')
+  const [phase, setPhase] = useState('starting') // starting | filling | waiting | submit | done | error | aborted
+  const [step, setStep] = useState({ page: 1, label: 'Starting…' })
+  const [filled, setFilled] = useState([])
+  const [needsReview, setNeedsReview] = useState([])
+  const [overrides, setOverrides] = useState({}) // name → value
   const [log, setLog] = useState([])
+  const [paused, setPaused] = useState(false)
+  const [doneMessage, setDoneMessage] = useState('')
   const wsRef = useRef(null)
+  const logEndRef = useRef(null)
 
+  const addLog = useCallback((text, level = 'info') => {
+    setLog(prev => [
+      ...prev.slice(-99),
+      { text, level, ts: new Date().toLocaleTimeString('en-US', { hour12: false }) },
+    ])
+  }, [])
+
+  // Connect WebSocket
   useEffect(() => {
-    const ws = new WebSocket(WS_URL)
+    if (!sessionId) return
+    const url = `ws://localhost:8000/ws?session=${sessionId}`
+    const ws = new WebSocket(url)
     wsRef.current = ws
 
-    ws.onopen = () => setWsStatus('connected')
-    ws.onclose = () => setWsStatus('disconnected')
-    ws.onerror = () => setWsStatus('disconnected')
-
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data)
-        handleMessage(msg)
-      } catch {}
+    ws.onopen = () => {
+      setWsStatus('connected')
+      addLog('Connected to automation engine', 'success')
     }
-
+    ws.onclose = () => {
+      setWsStatus('disconnected')
+      addLog('WebSocket disconnected', 'warn')
+    }
+    ws.onerror = () => {
+      setWsStatus('error')
+      addLog('WebSocket error', 'error')
+    }
+    ws.onmessage = (evt) => {
+      try {
+        handleMessage(JSON.parse(evt.data))
+      } catch {
+        // ignore parse errors
+      }
+    }
     return () => ws.close()
-  }, [])
+  }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function handleMessage(msg) {
     switch (msg.type) {
-      case 'step':
-        setStep({ current: msg.current, total: msg.total, label: msg.label })
-        break
-      case 'field_filled':
-        setFilledFields(prev => [...prev, { name: msg.field_name, value: msg.value }])
-        break
-      case 'field_review':
-        setReviewFields(prev => [...prev, { name: msg.field_name, label: msg.label, suggested: msg.suggested }])
-        setReviewValues(prev => ({ ...prev, [msg.field_name]: msg.suggested || '' }))
-        break
       case 'log':
-        setLog(prev => [...prev.slice(-49), { text: msg.text, level: msg.level || 'info', ts: new Date().toLocaleTimeString() }])
+        addLog(msg.text, msg.level)
         break
-      case 'paused':
-        setPaused(true)
+      case 'step_start':
+        setPhase('filling')
+        setStep({ page: msg.page, label: msg.label || `Page ${msg.page}` })
+        setFilled([])
+        setNeedsReview([])
+        setOverrides({})
+        break
+      case 'page_ready':
+        setPhase('waiting')
+        setFilled(msg.filled || [])
+        setNeedsReview(msg.needs_review || [])
+        setOverrides(
+          Object.fromEntries((msg.needs_review || []).map(f => [f.name, f.value || '']))
+        )
+        addLog(
+          `Page ${msg.page}: ${(msg.filled || []).length} filled, ${(msg.needs_review || []).length} need review`,
+          'info',
+        )
+        // Auto-proceed if nothing to review (full_auto or no review items)
+        if ((msg.needs_review || []).length === 0 && mode === 'copilot') {
+          setTimeout(() => sendProceed([]), 800)
+        }
+        break
+      case 'ready_to_submit':
+        setPhase('submit')
+        addLog('All pages complete. Review and click Submit.', 'success')
         break
       case 'complete':
-        setLog(prev => [...prev, { text: 'Application submitted successfully!', level: 'success', ts: new Date().toLocaleTimeString() }])
+        setPhase('done')
+        setDoneMessage(msg.text || 'Complete!')
+        addLog(msg.text || 'Application complete!', 'success')
+        break
+      case 'error':
+        setPhase('error')
+        addLog(msg.text || 'An error occurred', 'error')
+        break
+      case 'aborted':
+        setPhase('aborted')
+        addLog('Automation aborted.', 'warn')
         break
     }
   }
 
-  function send(data) {
+  function sendWS(data) {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(data))
     }
   }
 
-  function handleNextStep() {
-    const overrides = Object.entries(reviewValues).map(([name, value]) => ({ name, value }))
-    send({ type: 'next_step', overrides })
-    setReviewFields([])
-    setFilledFields([])
-    setPaused(false)
+  function sendProceed(extraOverrides = []) {
+    const all = [
+      ...Object.entries(overrides).map(([name, value]) => ({ name, value })),
+      ...extraOverrides,
+    ].filter(o => o.value)
+    sendWS({ type: 'proceed', overrides: all })
+    setPhase('filling')
   }
 
-  function handlePause() {
-    send({ type: 'pause' })
-    setPaused(true)
+  function sendAbort() {
+    sendWS({ type: 'abort' })
   }
 
-  function handleResume() {
-    send({ type: 'resume' })
-    setPaused(false)
+  function handleFieldEdit(name, value) {
+    setOverrides(prev => ({ ...prev, [name]: value }))
   }
 
-  function handleAbort() {
-    send({ type: 'abort' })
-    onClose()
-  }
+  // Keyboard shortcut: Enter = proceed
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && phase === 'waiting') {
+        sendProceed()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [phase, overrides]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const canProceed = reviewFields.length === 0 || reviewFields.every(f => reviewValues[f.name]?.trim())
+  // Auto-scroll log
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [log])
+
+  const canProceed = phase === 'waiting' || phase === 'submit'
+  const allReviewFilled = needsReview.every(f => overrides[f.name]?.trim())
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
 
   return (
-    <div className="fixed right-0 top-0 h-full w-80 bg-gray-950/95 backdrop-blur border-l border-gray-700/60 shadow-2xl flex flex-col z-50">
+    <div className="fixed right-0 top-0 h-full w-[340px] bg-gray-950 border-l border-gray-800 shadow-2xl flex flex-col z-50 text-sm">
+
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800 shrink-0">
+        <div className="flex items-center gap-2.5">
           <div className={clsx(
-            'w-2 h-2 rounded-full',
-            wsStatus === 'connected' ? 'bg-green-500 animate-pulse' : wsStatus === 'connecting' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'
+            'w-2 h-2 rounded-full shrink-0',
+            wsStatus === 'connected' && phase !== 'error' && phase !== 'aborted'
+              ? 'bg-green-500 animate-pulse' : wsStatus === 'connecting'
+              ? 'bg-yellow-500 animate-pulse' : 'bg-red-500',
           )} />
-          <span className="text-sm font-semibold text-white">
-            {mode === 'full_auto' ? 'Full Auto' : 'Co-Pilot'}
+          <span className="font-semibold text-white text-sm">
+            {mode === 'copilot' ? 'Co-Pilot' : 'Full Auto'}
           </span>
-          <span className="text-xs text-gray-500">{wsStatus}</span>
+          <span className="text-xs text-gray-600 capitalize">{phase}</span>
         </div>
         <button onClick={onClose} className="text-gray-600 hover:text-gray-300 transition-colors">
-          <X size={14} />
+          <X size={15} />
         </button>
       </div>
 
-      {/* Job context */}
-      <div className="px-4 py-3 border-b border-gray-800/60 bg-gray-900/50">
-        <p className="text-xs text-gray-500 truncate">{jobData?.company} — {jobData?.job_title}</p>
-        <p className="text-xs text-indigo-400 mono">{analysis?.ats_platform} · Score: {analysis?.match_score}</p>
+      {/* Job context strip */}
+      <div className="px-4 py-2.5 border-b border-gray-800/60 bg-gray-900/40 shrink-0">
+        <p className="text-xs text-gray-400 font-medium truncate">
+          {jobData?.company} — {jobData?.job_title}
+        </p>
+        <p className="text-xs text-gray-600 mono">
+          {analysis?.ats_platform} · Score: {analysis?.match_score ?? '—'}
+        </p>
       </div>
 
-      {/* Step indicator */}
-      <div className="px-4 py-3 border-b border-gray-800/60">
-        <div className="flex items-center justify-between mb-1.5">
+      {/* Step bar */}
+      <div className="px-4 py-2.5 border-b border-gray-800/60 shrink-0">
+        <div className="flex items-center justify-between mb-1">
           <span className="text-xs text-gray-400">{step.label}</span>
-          <span className="mono text-xs text-gray-500">{step.current}/{step.total}</span>
+          <span className="text-xs text-gray-600 mono">Page {step.page}</span>
         </div>
-        <div className="w-full bg-gray-800 rounded-full h-1">
+        <div className="w-full h-1 bg-gray-800 rounded-full overflow-hidden">
           <div
-            className="bg-indigo-500 h-1 rounded-full transition-all duration-500"
-            style={{ width: `${(step.current / step.total) * 100}%` }}
+            className={clsx(
+              'h-1 rounded-full transition-all duration-700',
+              phase === 'done' ? 'w-full bg-green-500' :
+              phase === 'submit' ? 'w-11/12 bg-indigo-500' :
+              phase === 'waiting' ? 'w-3/4 bg-indigo-500' :
+              'w-1/3 bg-indigo-500 animate-pulse',
+            )}
           />
         </div>
       </div>
 
       {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
-        {/* Filled fields */}
-        {filledFields.length > 0 && (
-          <div>
-            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">Auto-Filled</p>
+
+        {/* Done / Error / Aborted terminal states */}
+        {phase === 'done' && (
+          <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 text-center">
+            <CheckCircle size={28} className="text-green-400 mx-auto mb-2" />
+            <p className="text-green-300 font-semibold text-sm">{doneMessage}</p>
+            <p className="text-gray-500 text-xs mt-1">Application logged to Tracker.</p>
+          </div>
+        )}
+        {phase === 'error' && (
+          <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-center">
+            <XCircle size={28} className="text-red-400 mx-auto mb-2" />
+            <p className="text-red-300 font-semibold text-sm">Automation error</p>
+            <p className="text-gray-500 text-xs mt-1">Check the log below for details.</p>
+          </div>
+        )}
+        {phase === 'aborted' && (
+          <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 text-center">
+            <p className="text-gray-400 font-semibold text-sm">Automation aborted</p>
+          </div>
+        )}
+        {phase === 'submit' && (
+          <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-xl p-4 text-center">
+            <Zap size={22} className="text-indigo-400 mx-auto mb-2" />
+            <p className="text-indigo-200 font-semibold text-sm">Ready to Submit</p>
+            <p className="text-gray-500 text-xs mt-1">Review the application in the browser, then click Submit below.</p>
+          </div>
+        )}
+
+        {/* Connecting state */}
+        {phase === 'starting' && (
+          <div className="flex items-center gap-2 text-xs text-gray-500 py-4 justify-center">
+            <Loader2 size={14} className="animate-spin" />
+            Starting automation engine…
+          </div>
+        )}
+
+        {/* Filling indicator */}
+        {phase === 'filling' && (
+          <div className="flex items-center gap-2 text-xs text-gray-500 py-2">
+            <Loader2 size={12} className="animate-spin text-indigo-400" />
+            Filling form fields…
+          </div>
+        )}
+
+        {/* Auto-filled fields (collapsible) */}
+        {filled.length > 0 && (
+          <CollapsibleSection
+            title={`Auto-Filled (${filled.length})`}
+            titleColor="text-green-400"
+            defaultOpen={needsReview.length === 0}
+          >
             <div className="space-y-1.5">
-              {filledFields.map((f, i) => (
-                <div key={i} className="flex items-start gap-2 text-xs">
-                  <CheckCircle size={11} className="text-green-500 mt-0.5 shrink-0" />
-                  <div className="min-w-0">
-                    <span className="text-gray-400">{f.name}: </span>
-                    <span className="text-white truncate">{f.value}</span>
-                  </div>
-                </div>
+              {filled.map(f => (
+                <FieldRow key={f.name} field={f} onEdit={handleFieldEdit} />
               ))}
             </div>
-          </div>
+          </CollapsibleSection>
         )}
 
-        {/* Review fields */}
-        {reviewFields.length > 0 && (
+        {/* Needs review fields (always open) */}
+        {needsReview.length > 0 && (
           <div>
-            <p className="text-xs font-semibold text-yellow-600 uppercase tracking-wider mb-2 flex items-center gap-1">
-              <AlertTriangle size={11} />
-              Needs Review
-            </p>
-            <div className="space-y-3">
-              {reviewFields.map((f, i) => (
-                <div key={i} className="bg-yellow-500/5 border border-yellow-500/20 rounded-lg p-3">
-                  <p className="text-xs text-yellow-400 font-medium mb-1.5">{f.label}</p>
-                  <textarea
-                    rows={3}
-                    value={reviewValues[f.name] || ''}
-                    onChange={e => setReviewValues(prev => ({ ...prev, [f.name]: e.target.value }))}
-                    className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2.5 py-2 text-xs text-white resize-none outline-none focus:border-yellow-500 transition-all"
-                  />
-                </div>
+            <div className="flex items-center gap-1.5 mb-2">
+              <AlertTriangle size={11} className="text-yellow-500" />
+              <span className="text-xs font-semibold text-yellow-500 uppercase tracking-wider">
+                Needs Review ({needsReview.length})
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              {needsReview.map(f => (
+                <FieldRow
+                  key={f.name}
+                  field={{ ...f, value: overrides[f.name] ?? f.value }}
+                  onEdit={handleFieldEdit}
+                />
               ))}
             </div>
           </div>
         )}
 
-        {/* Log */}
+        {/* Activity log */}
         {log.length > 0 && (
-          <div>
-            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">Activity</p>
-            <div className="space-y-1">
-              {log.slice(-10).map((entry, i) => (
-                <div key={i} className={clsx(
-                  'text-xs flex items-start gap-1.5',
-                  entry.level === 'error' ? 'text-red-400' :
-                  entry.level === 'success' ? 'text-green-400' :
-                  'text-gray-500'
-                )}>
-                  <span className="mono shrink-0 text-gray-700">{entry.ts}</span>
-                  <span>{entry.text}</span>
-                </div>
-              ))}
+          <CollapsibleSection title="Activity Log" titleColor="text-gray-600" defaultOpen={false}>
+            <div className="space-y-1 font-mono">
+              {log.map((entry, i) => <LogEntry key={i} entry={entry} />)}
+              <div ref={logEndRef} />
             </div>
-          </div>
-        )}
-
-        {wsStatus === 'connecting' && (
-          <div className="flex items-center gap-2 text-xs text-gray-500">
-            <Loader2 size={12} className="animate-spin" />
-            Connecting to automation engine…
-          </div>
+          </CollapsibleSection>
         )}
       </div>
 
       {/* Controls */}
-      <div className="px-4 py-3 border-t border-gray-800 space-y-2">
-        {mode === 'copilot' && (
+      <div className="px-4 py-3 border-t border-gray-800 space-y-2 shrink-0">
+        {/* Primary action */}
+        {mode === 'copilot' && phase === 'waiting' && (
           <button
-            onClick={handleNextStep}
-            disabled={!canProceed || wsStatus !== 'connected'}
-            className="flex items-center justify-center gap-2 w-full px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-800 disabled:text-gray-600 text-white text-sm font-semibold rounded-lg transition-all"
+            onClick={() => sendProceed()}
+            disabled={!allReviewFilled}
+            className={clsx(
+              'flex items-center justify-center gap-2 w-full px-4 py-2.5 rounded-xl text-sm font-semibold transition-all',
+              allReviewFilled
+                ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-900/30'
+                : 'bg-gray-800 text-gray-600 cursor-not-allowed',
+            )}
           >
-            <ChevronRight size={14} />
-            Next Step
+            <ChevronRight size={15} />
+            Approve & Continue
+            <span className="text-xs font-normal opacity-60 ml-1">Ctrl+↵</span>
           </button>
         )}
 
-        <div className="flex gap-2">
-          {!paused ? (
-            <button
-              onClick={handlePause}
-              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-gray-400 bg-gray-900 hover:bg-gray-800 border border-gray-700 rounded-lg transition-all"
-            >
-              <Pause size={11} />
-              Pause
-            </button>
-          ) : (
-            <button
-              onClick={handleResume}
-              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-green-400 bg-gray-900 hover:bg-gray-800 border border-green-700 rounded-lg transition-all"
-            >
-              <Zap size={11} />
-              Resume
-            </button>
-          )}
+        {phase === 'submit' && (
           <button
-            onClick={handleAbort}
-            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-red-400 bg-gray-900 hover:bg-gray-800 border border-red-900 hover:border-red-700 rounded-lg transition-all"
+            onClick={() => sendProceed()}
+            className="flex items-center justify-center gap-2 w-full px-4 py-2.5 rounded-xl text-sm font-semibold bg-green-700 hover:bg-green-600 text-white transition-all shadow-lg"
           >
-            <X size={11} />
-            Abort
+            <Send size={14} />
+            Submit Application
           </button>
-        </div>
+        )}
+
+        {/* Secondary controls */}
+        {!['done', 'error', 'aborted'].includes(phase) && (
+          <div className="flex gap-2">
+            {phase !== 'submit' && (
+              <button
+                onClick={() => { sendWS({ type: paused ? 'resume' : 'pause' }); setPaused(p => !p) }}
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-gray-400 bg-gray-900 hover:bg-gray-800 border border-gray-700 rounded-lg transition-all"
+              >
+                {paused ? <Play size={11} /> : <Pause size={11} />}
+                {paused ? 'Resume' : 'Pause'}
+              </button>
+            )}
+            <button
+              onClick={() => { sendAbort(); setPhase('aborted') }}
+              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs text-red-400 bg-gray-900 hover:bg-gray-800 border border-red-900 hover:border-red-700 rounded-lg transition-all"
+            >
+              <X size={11} />
+              Abort
+            </button>
+          </div>
+        )}
+
+        {/* Close after done */}
+        {['done', 'error', 'aborted'].includes(phase) && (
+          <button
+            onClick={onClose}
+            className="w-full px-4 py-2 text-sm text-gray-400 bg-gray-900 hover:bg-gray-800 border border-gray-700 rounded-lg transition-all"
+          >
+            Close
+          </button>
+        )}
       </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Collapsible section helper
+// ---------------------------------------------------------------------------
+function CollapsibleSection({ title, titleColor, children, defaultOpen = true }) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(o => !o)}
+        className={clsx('flex items-center gap-1.5 mb-2 text-xs font-semibold uppercase tracking-wider', titleColor)}
+      >
+        <ChevronRight size={11} className={clsx('transition-transform', open && 'rotate-90')} />
+        {title}
+      </button>
+      {open && children}
     </div>
   )
 }

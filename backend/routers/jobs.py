@@ -24,8 +24,14 @@ async def analyze_job_posting(request: JobUrlRequest):
     resumes_result = sb.table("resumes").select("label, parsed_text").execute()
     resumes = resumes_result.data or []
 
+    # Read use_ai setting
+    settings_result = sb.table("settings").select("key, value").eq("key", "use_ai").execute()
+    use_ai_val = True
+    if settings_result.data:
+        use_ai_val = settings_result.data[0]["value"].lower() not in ("false", "0", "no", "off")
+
     try:
-        analysis = await analyze_job(job_data, resumes)
+        analysis = await analyze_job(job_data, resumes, use_ai=use_ai_val)
     except Exception as exc:
         analysis = {
             "match_score": 0,
@@ -34,7 +40,7 @@ async def analyze_job_posting(request: JobUrlRequest):
             "gaps": [],
             "apply_recommendation": f"Analysis failed: {exc}",
             "ats_platform": job_data.get("ats_platform", "Unknown"),
-            "estimated_apply_time": "Unknown",
+            "estimated_apply_time": "~10 minutes",
         }
 
     return {"job_data": job_data, "analysis": analysis}

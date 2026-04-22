@@ -1,7 +1,7 @@
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from routers import profile, jobs, applications, settings
+from routers.automation import router as automation_router
 from services.applicator import ws_manager
 
 
@@ -31,6 +32,7 @@ app.include_router(profile.router)
 app.include_router(jobs.router)
 app.include_router(applications.router)
 app.include_router(settings.router)
+app.include_router(automation_router)
 
 resumes_dir = os.path.join(os.path.dirname(__file__), "..", "resumes")
 os.makedirs(resumes_dir, exist_ok=True)
@@ -55,11 +57,34 @@ async def health():
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await ws_manager.connect(websocket)
+async def websocket_endpoint(
+    websocket: WebSocket,
+    session: str = Query(default="global"),
+):
+    """
+    Session-aware WebSocket endpoint.
+
+    Frontend connects with: ws://localhost:8000/ws?session=<session_id>
+    First message can also include {type:"join", session_id:"..."} for
+    post-connect session attachment.
+
+    All messages from the frontend are routed to the matching AutomationSession
+    so the background task can consume them.
+    """
+    await ws_manager.connect(websocket, session)
     try:
         while True:
             data = await websocket.receive_json()
-            await ws_manager.broadcast({"type": "ack", "data": data})
+            # Support post-connect session join
+            if data.get("type") == "join":
+                new_session = data.get("session_id", session)
+                await ws_manager.disconnect(websocket, session)
+                session = new_session
+                await ws_manager.connect(websocket, session)
+                await websocket.send_json({"type": "joined", "session_id": session})
+            else:
+                await ws_manager.route_message(data, session)
     except WebSocketDisconnect:
-        await ws_manager.disconnect(websocket)
+        await ws_manager.disconnect(websocket, session)
+    except Exception:
+        await ws_manager.disconnect(websocket, session)

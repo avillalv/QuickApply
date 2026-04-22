@@ -45,10 +45,11 @@ CREATE TABLE IF NOT EXISTS settings (
 
 -- Insert default settings
 INSERT INTO settings (key, value) VALUES
+    ('use_ai', 'false'),
     ('default_mode', 'copilot'),
     ('browser_visible', 'true'),
     ('auto_submit', 'false'),
-    ('typing_speed_ms', '75'),
+    ('typing_speed_ms', '60'),
     ('page_load_timeout', '30'),
     ('anthropic_model', 'claude-sonnet-4-20250514'),
     ('desktop_notifications', 'true'),

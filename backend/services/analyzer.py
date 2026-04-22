@@ -1,166 +1,195 @@
 """
-Claude API-powered job analyzer.
-
-Analyzes a job posting against the user's resumes and returns a structured
-JobAnalysis including match score, recommended resume, gaps, and apply advice.
+Job analyzer — Claude-powered when AI is enabled, keyword-based fallback otherwise.
 """
-
 import json
 import os
 import re
 
-import anthropic
-from dotenv import load_dotenv
-
-load_dotenv()
-
 _MODEL = "claude-sonnet-4-20250514"
 
-_DEFAULT_ANALYSIS = {
+_DEFAULT = {
     "match_score": 0,
     "recommended_resume": "",
     "key_matches": [],
     "gaps": [],
-    "apply_recommendation": "Unable to analyze — please try again.",
+    "apply_recommendation": "Analysis unavailable.",
     "ats_platform": "Unknown",
-    "estimated_apply_time": "Unknown",
+    "estimated_apply_time": "~10 minutes",
 }
 
+# Common data engineering / analyst keywords for fallback scoring
+_TECH_KEYWORDS = [
+    "python", "sql", "spark", "kafka", "airflow", "dbt", "dbt core",
+    "snowflake", "bigquery", "redshift", "databricks", "pyspark",
+    "pandas", "numpy", "scikit-learn", "tensorflow", "pytorch",
+    "aws", "gcp", "azure", "s3", "ec2", "lambda", "glue", "athena",
+    "power bi", "tableau", "looker", "metabase",
+    "postgres", "postgresql", "mysql", "mongodb", "redis", "elasticsearch",
+    "docker", "kubernetes", "terraform", "ci/cd", "git",
+    "etl", "elt", "data pipeline", "data warehouse", "data lake",
+    "machine learning", "ml", "deep learning", "nlp",
+    "excel", "r", "scala", "java", "go", "typescript",
+]
 
-def _build_prompt(job_data: dict, resumes: list[dict]) -> str:
-    """Build the analysis prompt sent to Claude."""
-    job_title = job_data.get("job_title", "Unknown Role")
-    company = job_data.get("company", "Unknown Company")
-    job_description = job_data.get("job_description", "")
-    ats_platform = job_data.get("ats_platform", "Unknown")
 
-    resume_sections = []
+def _extract_keywords(text: str) -> set[str]:
+    text_lower = text.lower()
+    found = set()
+    for kw in _TECH_KEYWORDS:
+        if kw in text_lower:
+            found.add(kw)
+    return found
+
+
+def _keyword_analyze(job_data: dict, resumes: list[dict]) -> dict:
+    """Offline keyword-matching analysis — no API call."""
+    jd = (job_data.get("job_description") or "").lower()
+    jd_keywords = _extract_keywords(jd)
+
+    best_label = ""
+    best_score = 0
+    best_matches: list[str] = []
+    all_resume_keywords: set[str] = set()
+
     for resume in resumes:
-        label = resume.get("label", "Resume")
-        text = resume.get("parsed_text", "") or ""
-        resume_sections.append(f"--- {label} ---\n{text[:3000]}")
+        text = (resume.get("parsed_text") or "").lower()
+        resume_kws = _extract_keywords(text)
+        all_resume_keywords |= resume_kws
+        matched = jd_keywords & resume_kws
+        score = round(len(matched) / max(len(jd_keywords), 1) * 100)
+        if score > best_score:
+            best_score = score
+            best_label = resume.get("label", "")
+            best_matches = sorted(matched)
 
-    resumes_block = "\n\n".join(resume_sections) if resume_sections else "No resumes provided."
+    gaps = sorted(jd_keywords - all_resume_keywords)
+    best_score = min(best_score, 95)
 
-    prompt = f"""You are an expert job application coach and ATS specialist.
+    if best_score >= 80:
+        rec = "Strong match. Lead with directly relevant pipeline and analytics experience."
+    elif best_score >= 60:
+        rec = "Decent match. Highlight transferable skills and address gaps in your cover letter."
+    else:
+        rec = "Partial match. Review gaps before applying."
 
-Analyze the following job posting and the applicant's resumes, then return a JSON object matching the schema below.
+    ats = job_data.get("ats_platform", "Unknown")
+    apply_times = {
+        "Workday": "12 minutes",
+        "Greenhouse": "7 minutes",
+        "Lever": "6 minutes",
+        "iCIMS": "10 minutes",
+        "Taleo": "15 minutes",
+    }
 
-## Job Posting
-**Title**: {job_title}
-**Company**: {company}
-**ATS Platform**: {ats_platform}
-
-**Job Description**:
-{job_description[:4000]}
-
-## Applicant Resumes
-{resumes_block}
-
-## Instructions
-1. Calculate a match_score (0–100) based on how well the best resume matches the job requirements.
-2. Identify which resume label best fits this role.
-3. List concrete key_matches (skills/tools/experiences the applicant has that the job requires).
-4. List gaps (skills/tools the job requires that are missing from the resumes).
-5. Write a short, direct apply_recommendation (1–2 sentences on what to lead with or watch out for).
-6. Confirm or correct the ats_platform based on the job description context.
-7. Estimate the apply_time in minutes based on the ATS complexity.
-
-Return ONLY valid JSON — no markdown fences, no extra text — matching this exact schema:
-{{
-  "match_score": <integer 0-100>,
-  "recommended_resume": "<one of the resume labels provided>",
-  "key_matches": ["<skill or tool>", ...],
-  "gaps": ["<missing skill or tool>", ...],
-  "apply_recommendation": "<concise advice string>",
-  "ats_platform": "<platform name>",
-  "estimated_apply_time": "<e.g. '8 minutes'>"
-}}"""
-
-    return prompt
+    return {
+        "match_score": best_score,
+        "recommended_resume": best_label,
+        "key_matches": best_matches[:10],
+        "gaps": gaps[:8],
+        "apply_recommendation": rec,
+        "ats_platform": ats,
+        "estimated_apply_time": apply_times.get(ats, "~10 minutes"),
+    }
 
 
 def _extract_json(text: str) -> dict:
-    """
-    Attempt to parse a JSON object from Claude's response text.
-    Handles cases where Claude wraps JSON in markdown code fences.
-    """
-    # Strip markdown fences if present
     text = text.strip()
-    fence_match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
-    if fence_match:
-        text = fence_match.group(1).strip()
-
-    # Try direct parse
+    fence = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
+    if fence:
+        text = fence.group(1).strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-
-    # Try to find a JSON object via regex
-    obj_match = re.search(r"\{[\s\S]+\}", text)
-    if obj_match:
+    obj = re.search(r"\{[\s\S]+\}", text)
+    if obj:
         try:
-            return json.loads(obj_match.group(0))
+            return json.loads(obj.group(0))
         except json.JSONDecodeError:
             pass
-
     return {}
 
 
-async def analyze_job(job_data: dict, resumes: list[dict]) -> dict:
+async def analyze_job(job_data: dict, resumes: list[dict], use_ai: bool = True) -> dict:
     """
-    Analyze a job posting against the provided resumes using Claude.
+    Analyze a job posting against the provided resumes.
 
     Args:
-        job_data: Dict with keys from scraper (job_title, company,
-                  job_description, ats_platform, etc.).
-        resumes:  List of resume dicts, each with 'label' and 'parsed_text'.
+        job_data:  Dict from scraper.
+        resumes:   List of resume dicts with 'label' and 'parsed_text'.
+        use_ai:    If False, use offline keyword matching (no API cost).
 
     Returns:
-        Dict matching the JobAnalysis schema, or defaults with match_score=0
-        if analysis fails.
+        Dict matching the JobAnalysis schema.
     """
+    if not use_ai:
+        return _keyword_analyze(job_data, resumes)
+
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        result = dict(_DEFAULT_ANALYSIS)
-        result["apply_recommendation"] = "ANTHROPIC_API_KEY is not set."
-        return result
+        return _keyword_analyze(job_data, resumes)
+
+    import anthropic
+
+    job_title = job_data.get("job_title", "Unknown Role")
+    company = job_data.get("company", "Unknown Company")
+    job_description = job_data.get("job_description", "")
+    ats = job_data.get("ats_platform", "Unknown")
+
+    resume_sections = "\n\n".join(
+        f"--- {r.get('label', 'Resume')} ---\n{(r.get('parsed_text') or '')[:3000]}"
+        for r in resumes
+    ) or "No resumes provided."
+
+    prompt = f"""You are an expert job application coach.
+
+Analyze the job posting and applicant resumes below, then return ONLY a valid JSON object.
+
+## Job Posting
+Title: {job_title}
+Company: {company}
+ATS: {ats}
+
+Description:
+{job_description[:4000]}
+
+## Applicant Resumes
+{resume_sections}
+
+## Instructions
+Return ONLY this JSON (no markdown fences, no extra text):
+{{
+  "match_score": <integer 0-100>,
+  "recommended_resume": "<one of the resume labels above>",
+  "key_matches": ["<skill>", ...],
+  "gaps": ["<missing skill>", ...],
+  "apply_recommendation": "<1-2 sentence concise advice>",
+  "ats_platform": "{ats}",
+  "estimated_apply_time": "<e.g. '8 minutes'>"
+}}"""
 
     client = anthropic.Anthropic(api_key=api_key)
-    prompt = _build_prompt(job_data, resumes)
-
     try:
         message = client.messages.create(
             model=_MODEL,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
-        response_text = message.content[0].text if message.content else ""
-        parsed = _extract_json(response_text)
-
+        text = message.content[0].text if message.content else ""
+        parsed = _extract_json(text)
         if not parsed or "match_score" not in parsed:
-            return dict(_DEFAULT_ANALYSIS)
+            return _keyword_analyze(job_data, resumes)
 
-        # Validate and normalise fields
-        analysis = dict(_DEFAULT_ANALYSIS)
-        analysis["match_score"] = int(parsed.get("match_score", 0))
-        analysis["recommended_resume"] = str(parsed.get("recommended_resume", ""))
-        analysis["key_matches"] = [str(x) for x in parsed.get("key_matches", [])]
-        analysis["gaps"] = [str(x) for x in parsed.get("gaps", [])]
-        analysis["apply_recommendation"] = str(parsed.get("apply_recommendation", ""))
-        analysis["ats_platform"] = str(
-            parsed.get("ats_platform", job_data.get("ats_platform", "Unknown"))
-        )
-        analysis["estimated_apply_time"] = str(parsed.get("estimated_apply_time", "Unknown"))
-
-        return analysis
-
-    except anthropic.APIError as exc:
-        result = dict(_DEFAULT_ANALYSIS)
-        result["apply_recommendation"] = f"API error: {exc}"
+        result = dict(_DEFAULT)
+        result.update({
+            "match_score": int(parsed.get("match_score", 0)),
+            "recommended_resume": str(parsed.get("recommended_resume", "")),
+            "key_matches": [str(x) for x in parsed.get("key_matches", [])],
+            "gaps": [str(x) for x in parsed.get("gaps", [])],
+            "apply_recommendation": str(parsed.get("apply_recommendation", "")),
+            "ats_platform": str(parsed.get("ats_platform", ats)),
+            "estimated_apply_time": str(parsed.get("estimated_apply_time", "~10 minutes")),
+        })
         return result
-    except Exception as exc:
-        result = dict(_DEFAULT_ANALYSIS)
-        result["apply_recommendation"] = f"Unexpected error: {exc}"
-        return result
+    except Exception:
+        return _keyword_analyze(job_data, resumes)
