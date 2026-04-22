@@ -51,7 +51,7 @@ INSERT INTO settings (key, value) VALUES
     ('auto_submit', 'false'),
     ('typing_speed_ms', '60'),
     ('page_load_timeout', '30'),
-    ('anthropic_model', 'claude-sonnet-4-20250514'),
+    ('anthropic_model', 'claude-sonnet-4-6'),
     ('desktop_notifications', 'true'),
     ('max_apps_per_hour', '5')
 ON CONFLICT (key) DO NOTHING;

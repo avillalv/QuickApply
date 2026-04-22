@@ -1,4 +1,5 @@
 import asyncio
+import re
 import random
 from dataclasses import dataclass, field
 from typing import Optional
@@ -8,14 +9,14 @@ from typing import Optional
 class FormField:
     name: str
     label: str
-    field_type: str  # "text" | "email" | "tel" | "select" | "checkbox" | "radio" | "textarea" | "file"
+    field_type: str  # text|email|tel|select|checkbox|radio|textarea|file|date
     value: Optional[str] = None
     options: list[str] = field(default_factory=list)
     required: bool = False
     filled: bool = False
     needs_review: bool = False
     confidence: float = 0.0
-    selector: Optional[str] = None  # CSS selector hint for fill_field
+    selector: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -38,7 +39,7 @@ class ATSHandler:
         self.profile = profile
         self.mode = mode
         self.page = None
-        self.typing_delay: int = 60  # ms per character
+        self.typing_delay: int = 60
 
     # ------------------------------------------------------------------
     # Subclass interface
@@ -51,11 +52,6 @@ class ATSHandler:
         raise NotImplementedError
 
     async def get_form_fields(self, page) -> list[FormField]:
-        """
-        Scan the current page for form fields, map values from profile,
-        and fill fields that have high-confidence mappings.
-        Returns all FormField objects (filled=True or needs_review=True).
-        """
         raise NotImplementedError
 
     async def fill_field(self, page, form_field: FormField, value: str) -> None:
@@ -65,19 +61,16 @@ class ATSHandler:
         raise NotImplementedError
 
     async def next_page(self, page) -> bool:
-        """Click Next/Continue. Returns True if there are more pages."""
         raise NotImplementedError
 
     async def submit(self, page) -> bool:
-        """Submit the form. Returns True on success."""
         raise NotImplementedError
 
     # ------------------------------------------------------------------
-    # Shared utilities
+    # Text input
     # ------------------------------------------------------------------
 
     async def human_type(self, page, selector: str, text: str) -> None:
-        """Type text into a field character by character with randomised delay."""
         try:
             el = await page.wait_for_selector(selector, timeout=8000, state="visible")
             await el.click()
@@ -88,102 +81,333 @@ class ATSHandler:
                 jitter = random.uniform(0.5, 1.5)
                 await asyncio.sleep((self.typing_delay * jitter) / 1000)
         except Exception:
-            # Fall back to fill() for speed
             try:
                 await page.fill(selector, text)
             except Exception:
                 pass
 
+    async def fill_text_field(self, page, selector: str, value: str) -> bool:
+        """Fill a text/textarea field, trying fill() then JS dispatch."""
+        if not value:
+            return False
+        try:
+            await page.fill(selector, value)
+            return True
+        except Exception:
+            pass
+        try:
+            el = await page.query_selector(selector)
+            if el:
+                await page.evaluate(
+                    f"""el => {{
+                        el.value = {repr(value)};
+                        el.dispatchEvent(new Event('input', {{bubbles:true}}));
+                        el.dispatchEvent(new Event('change', {{bubbles:true}}));
+                    }}""",
+                    el,
+                )
+                return True
+        except Exception:
+            pass
+        return False
+
+    # ------------------------------------------------------------------
+    # Select / Dropdown
+    # ------------------------------------------------------------------
+
     async def handle_select(self, page, selector: str, value: str) -> bool:
-        """Handle a native <select> element."""
+        """Handle <select> element by label or value."""
         try:
             await page.select_option(selector, label=value)
             return True
         except Exception:
-            try:
-                await page.select_option(selector, value=value)
-                return True
-            except Exception:
-                return False
-
-    async def handle_dropdown(self, page, selector: str, value: str) -> None:
-        """Handle custom dropdown (click, wait for options, pick best match)."""
+            pass
         try:
-            await page.click(selector, timeout=5000)
+            await page.select_option(selector, value=value)
+            return True
         except Exception:
-            return
+            pass
+        # Try case-insensitive partial match via JS
+        try:
+            matched = await page.evaluate(f"""sel => {{
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                const val = {repr(value.lower())};
+                for (const opt of el.options) {{
+                    if (opt.text.toLowerCase().includes(val) || opt.value.toLowerCase().includes(val)) {{
+                        el.value = opt.value;
+                        el.dispatchEvent(new Event('change', {{bubbles:true}}));
+                        return true;
+                    }}
+                }}
+                return false;
+            }}""", selector)
+            return bool(matched)
+        except Exception:
+            return False
 
-        await asyncio.sleep(0.3)
+    async def handle_dropdown(self, page, trigger_selector: str, value: str) -> bool:
+        """Handle custom (non-native) dropdown: click trigger, pick option."""
+        try:
+            await page.click(trigger_selector, timeout=5000)
+        except Exception:
+            return False
+
+        await asyncio.sleep(0.4)
 
         # Try native select first
-        if await self.handle_select(page, selector, value):
-            return
+        if await self.handle_select(page, trigger_selector, value):
+            return True
 
-        # Try listbox options
+        val_lower = value.lower()
+
+        # Try ARIA listbox options
         option_selectors = [
             f"[role='option']:has-text('{value}')",
             f"li[role='option']:has-text('{value}')",
             f".dropdown-option:has-text('{value}')",
             f"[data-value='{value}']",
+            f"li:has-text('{value}')",
         ]
         for sel in option_selectors:
             try:
                 el = await page.query_selector(sel)
-                if el:
+                if el and await el.is_visible():
                     await el.click()
-                    return
+                    return True
             except Exception:
                 pass
 
-        # Fuzzy match: find best matching option text
+        # Fuzzy text match among visible options
         try:
-            options = await page.query_selector_all("[role='option'], li[role='option']")
+            options = await page.query_selector_all(
+                "[role='option'], li[role='option'], .select-option, li.option"
+            )
             best_el = None
             best_score = 0.0
-            val_lower = value.lower()
             for opt in options:
-                text = (await opt.inner_text()).strip().lower()
-                if val_lower in text:
-                    score = len(val_lower) / len(text) if text else 0
-                    if score > best_score:
-                        best_score = score
-                        best_el = opt
-            if best_el:
+                try:
+                    text = (await opt.inner_text()).strip().lower()
+                    if val_lower in text:
+                        score = len(val_lower) / max(len(text), 1)
+                        if score > best_score:
+                            best_score = score
+                            best_el = opt
+                except Exception:
+                    pass
+            if best_el and best_score > 0.3:
                 await best_el.click()
+                return True
         except Exception:
             pass
 
+        return False
+
+    # ------------------------------------------------------------------
+    # Radio / Checkbox
+    # ------------------------------------------------------------------
+
     async def handle_radio_or_checkbox(self, page, name: str, value: str) -> bool:
-        """Click a radio/checkbox whose label matches value."""
         truthy = value.lower() in ("yes", "true", "1", "y")
         try:
-            # Try by label text
-            label_sel = f"label:has-text('{value}')"
-            el = await page.query_selector(label_sel)
-            if el:
-                await el.click()
-                return True
-            # Try by input value
+            # By label text
+            for label_sel in [
+                f"label:has-text('{value}')",
+                f"label:has-text('{value.lower()}')",
+            ]:
+                el = await page.query_selector(label_sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    return True
+            # By input value attribute
             inp = await page.query_selector(f"input[name='{name}'][value='{value}']")
             if inp:
                 await inp.click()
                 return True
-            # Yes/No radios
-            if truthy:
-                for val in ("Yes", "yes", "Y", "True", "true"):
-                    inp = await page.query_selector(f"input[name='{name}'][value='{val}']")
-                    if inp:
-                        await inp.click()
-                        return True
-            else:
-                for val in ("No", "no", "N", "False", "false"):
-                    inp = await page.query_selector(f"input[name='{name}'][value='{val}']")
-                    if inp:
-                        await inp.click()
-                        return True
+            # Yes/No pattern
+            candidates = ["Yes", "yes", "Y", "True", "true"] if truthy else ["No", "no", "N", "False", "false"]
+            for val in candidates:
+                inp = await page.query_selector(f"input[name='{name}'][value='{val}']")
+                if inp:
+                    await inp.click()
+                    return True
         except Exception:
             pass
         return False
+
+    # ------------------------------------------------------------------
+    # Date picker
+    # ------------------------------------------------------------------
+
+    async def handle_date_field(self, page, selector: str, value: str) -> bool:
+        """Handle both native date inputs and custom date pickers."""
+        if not value:
+            return False
+        try:
+            el = await page.query_selector(selector)
+            if not el:
+                return False
+
+            input_type = await el.evaluate("e => e.type || ''")
+
+            # Native date input (type="date") expects YYYY-MM-DD
+            if input_type == "date":
+                # Try to parse common formats into YYYY-MM-DD
+                normalized = self._normalize_date(value)
+                if normalized:
+                    await page.fill(selector, normalized)
+                    return True
+                return False
+
+            # Plain text date field
+            if input_type in ("text", ""):
+                await page.fill(selector, value)
+                # Check if a calendar popup appeared
+                await asyncio.sleep(0.3)
+                closed = await self._close_date_picker(page)
+                return True
+
+        except Exception:
+            pass
+        return False
+
+    def _normalize_date(self, value: str) -> Optional[str]:
+        """Convert various date formats to YYYY-MM-DD."""
+        import datetime
+        formats = [
+            "%B %Y", "%b %Y", "%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y",
+            "%d/%m/%Y", "%Y/%m/%d", "%B %d, %Y", "%b %d, %Y",
+        ]
+        for fmt in formats:
+            try:
+                dt = datetime.datetime.strptime(value.strip(), fmt)
+                return dt.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        # "Immediately" → today
+        if "immediate" in value.lower():
+            return datetime.datetime.today().strftime("%Y-%m-%d")
+        return None
+
+    async def _close_date_picker(self, page) -> bool:
+        """Close any calendar popup that appeared."""
+        close_selectors = [
+            "button.calendar-close", ".datepicker-close", "[aria-label='Close']",
+            ".react-datepicker__close-icon",
+        ]
+        for sel in close_selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    return True
+            except Exception:
+                pass
+        # Press Escape to close
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return False
+
+    # ------------------------------------------------------------------
+    # Rich text / WYSIWYG
+    # ------------------------------------------------------------------
+
+    async def handle_rich_text(self, page, selector: str, value: str) -> bool:
+        """Fill a contenteditable/rich-text field (e.g., Quill, Draft.js)."""
+        if not value:
+            return False
+        try:
+            el = await page.query_selector(selector)
+            if not el:
+                return False
+
+            # Check if it's contenteditable
+            ce = await el.get_attribute("contenteditable")
+            if ce in ("true", ""):
+                await el.click()
+                await page.keyboard.press("Control+a")
+                await page.keyboard.press("Delete")
+                await el.type(value)
+                return True
+
+            # Quill editor
+            quill = await page.query_selector(".ql-editor")
+            if quill:
+                await quill.click()
+                await page.keyboard.press("Control+a")
+                await page.keyboard.press("Delete")
+                await quill.type(value)
+                return True
+
+            # Draft.js
+            draft = await page.query_selector(".DraftEditor-editorContainer [contenteditable='true']")
+            if draft:
+                await draft.click()
+                await page.keyboard.press("Control+a")
+                await page.keyboard.press("Delete")
+                await draft.type(value)
+                return True
+
+        except Exception:
+            pass
+        return False
+
+    # ------------------------------------------------------------------
+    # Phone number formatting
+    # ------------------------------------------------------------------
+
+    def format_phone(self, phone: str, format_hint: str = "") -> str:
+        """Normalize phone number, optionally to a specific format."""
+        if not phone:
+            return ""
+        # Strip to digits only
+        digits = re.sub(r"\D", "", phone)
+        if digits.startswith("1") and len(digits) == 11:
+            digits = digits[1:]  # Remove US country code
+        if len(digits) != 10:
+            return phone  # Return original if we can't parse
+
+        hint_lower = format_hint.lower()
+        if "dash" in hint_lower or re.search(r"\d{3}-\d{3}-\d{4}", format_hint):
+            return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
+        if "dot" in hint_lower or "period" in hint_lower:
+            return f"{digits[:3]}.{digits[3:6]}.{digits[6:]}"
+        if "paren" in hint_lower or re.search(r"\(\d{3}\)", format_hint):
+            return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+        # Default: (555) 123-4567
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+
+    # ------------------------------------------------------------------
+    # Multi-select
+    # ------------------------------------------------------------------
+
+    async def handle_multiselect(self, page, selector: str, values: list[str]) -> bool:
+        """Select multiple options in a <select multiple> or custom multi-select."""
+        if not values:
+            return False
+        try:
+            # Native multi-select
+            await page.select_option(selector, label=values)
+            return True
+        except Exception:
+            pass
+        # Try clicking each option in a custom multi-select
+        for val in values:
+            try:
+                opt_sel = f"[role='option']:has-text('{val}')"
+                el = await page.query_selector(opt_sel)
+                if el:
+                    await el.click()
+                    await asyncio.sleep(0.1)
+            except Exception:
+                pass
+        return False
+
+    # ------------------------------------------------------------------
+    # Shared utilities
+    # ------------------------------------------------------------------
 
     async def random_delay(self, min_ms: int = 200, max_ms: int = 600) -> None:
         await asyncio.sleep(random.randint(min_ms, max_ms) / 1000)
@@ -197,7 +421,6 @@ class ATSHandler:
             return False
 
     def _profile_value(self, key: str) -> Optional[str]:
-        """Extract a string value from profile by key with bool conversion."""
         from utils.field_mapper import FieldMapper
         return FieldMapper(self.profile)._get_profile_value(key)
 
@@ -208,17 +431,37 @@ class ATSHandler:
                 const lbl = document.querySelector(`label[for="${el.id}"]`);
                 if (lbl) return lbl.innerText.trim();
             }
-            const aria = el.getAttribute('aria-label') || el.getAttribute('aria-labelledby');
-            if (aria) {
-                const ref = document.getElementById(aria);
-                return ref ? ref.innerText.trim() : aria.trim();
+            const ariaLabel = el.getAttribute('aria-label');
+            if (ariaLabel) return ariaLabel.trim();
+            const ariaLabelledBy = el.getAttribute('aria-labelledby');
+            if (ariaLabelledBy) {
+                const ref = document.getElementById(ariaLabelledBy);
+                if (ref) return ref.innerText.trim();
             }
+            // Walk up DOM looking for label/legend
             let node = el.parentNode;
-            while (node && node !== document.body) {
+            for (let i = 0; i < 6 && node && node !== document.body; i++) {
                 if (node.tagName === 'LABEL') return node.innerText.replace(el.value||'','').trim();
-                const lbl = node.querySelector('label, .label, [class*="label"], legend');
+                const lbl = node.querySelector('label, legend, .label, .field-label, [class*="label"]:not(input)');
                 if (lbl && !lbl.contains(el)) return lbl.innerText.trim();
                 node = node.parentNode;
             }
-            return el.placeholder || el.name || '';
+            return el.placeholder || el.name || el.id || '';
         }""", element)
+
+    async def _get_options_for_select(self, page, el) -> list[str]:
+        """Return all option texts for a <select> element."""
+        try:
+            return await page.evaluate(
+                "el => Array.from(el.options).map(o => o.text.trim()).filter(Boolean)", el
+            )
+        except Exception:
+            return []
+
+    async def scroll_into_view(self, page, selector: str) -> None:
+        try:
+            el = await page.query_selector(selector)
+            if el:
+                await el.scroll_into_view_if_needed()
+        except Exception:
+            pass

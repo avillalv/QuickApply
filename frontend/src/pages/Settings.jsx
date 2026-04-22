@@ -88,7 +88,7 @@ export default function Settings() {
     auto_submit: 'false',
     typing_speed_ms: '60',
     page_load_timeout: '30',
-    anthropic_model: 'claude-sonnet-4-20250514',
+    anthropic_model: 'claude-sonnet-4-6',
     desktop_notifications: 'true',
     max_apps_per_hour: '5',
   })
@@ -276,8 +276,8 @@ export default function Settings() {
               onChange={e => set('anthropic_model', e.target.value)}
               className="bg-gray-800 border border-gray-700 focus:border-indigo-500 rounded-lg px-3 py-2.5 text-sm text-white outline-none"
             >
-              <option value="claude-sonnet-4-20250514">claude-sonnet-4-20250514 (recommended)</option>
-              <option value="claude-opus-4-5-20251101">claude-opus-4-5-20251101 (highest quality)</option>
+              <option value="claude-sonnet-4-6">claude-sonnet-4-6 (recommended)</option>
+              <option value="claude-opus-4-7">claude-opus-4-7 (highest quality)</option>
               <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001 (fastest/cheapest)</option>
             </select>
           </Field>
